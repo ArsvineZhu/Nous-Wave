@@ -54,7 +54,7 @@ max_hops = 8
 use_decay = 0.5
 
 [models.embedding]
-enabled = true
+enabled = false
 endpoint = "http://127.0.0.1:8001"
 model = "configured-by-operator"
 
@@ -64,7 +64,7 @@ endpoint = "http://127.0.0.1:8002"
 model = "configured-by-operator"
 
 [models.generation]
-enabled = true
+enabled = false
 endpoint = "http://127.0.0.1:8000"
 model = "configured-by-operator"
 

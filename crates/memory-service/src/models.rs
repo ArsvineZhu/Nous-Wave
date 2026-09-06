@@ -258,3 +258,33 @@ fn validate_embedding(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn endpoint(enabled: bool) -> ModelEndpoint {
+        ModelEndpoint {
+            enabled,
+            endpoint: "http://127.0.0.1:9/model".into(),
+            model: "test-model".into(),
+            revision: "r1".into(),
+            preprocessing: "identity".into(),
+            timeout_seconds: 1,
+            max_response_bytes: 1024,
+        }
+    }
+    #[tokio::test]
+    async fn unconfigured_provider_is_truthfully_unavailable() {
+        let services = ModelServices::new(None, None, None).unwrap();
+        let error = services.embed(&["text".into()]).await.unwrap_err();
+        assert!(matches!(error, Error::Unavailable(_)));
+    }
+    #[test]
+    fn disabled_endpoint_does_not_require_a_url() {
+        let mut config = endpoint(false);
+        config.endpoint.clear();
+        config.model.clear();
+        assert!(config.validate().is_ok());
+        assert!(endpoint(true).provenance().is_ok());
+    }
+}

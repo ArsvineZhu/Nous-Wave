@@ -119,7 +119,8 @@ impl LocalRuntime {
             budget.max_candidates,
         ))
         .map_err(|e| Error::Invalid(e.to_string()))?;
-        if state.queried.insert(signature) {
+        let first_query = state.queried.insert(signature);
+        if first_query {
             for target in &intent.target {
                 let ids = self
                     .reference_candidates(subject, *target, budget.max_candidates)
@@ -174,38 +175,41 @@ impl LocalRuntime {
                                     &provenance.preprocessing,
                                     result.vectors[0].len(),
                                 );
-                                match self
-                                    .projection
-                                    .as_ref()
-                                    .expect("checked projection")
-                                    .search(
-                                        &table,
-                                        subject,
-                                        &result.vectors[0],
-                                        budget.max_candidates,
-                                    )
-                                    .await
-                                {
-                                    Ok(revisions) => {
-                                        let rows=sqlx::query("SELECT revision_id,object_id FROM memory_revisions WHERE subject_id=$1 AND revision_id=ANY($2)").bind(subject.0).bind(&revisions).fetch_all(self.store.pool()).await.map_err(db)?;
-                                        let map: BTreeMap<Uuid, Uuid> = rows
-                                            .iter()
-                                            .map(|row| {
-                                                Ok((
-                                                    row.try_get("revision_id").map_err(db)?,
-                                                    row.try_get("object_id").map_err(db)?,
-                                                ))
-                                            })
-                                            .collect::<Result<_>>()?;
-                                        let ids: Vec<Uuid> = revisions
-                                            .iter()
-                                            .filter_map(|id| map.get(id).copied())
-                                            .collect();
-                                        fuse(&mut scores, &ids);
-                                        trace.index_queries += 1;
-                                        trace.candidate_channels.push("dense".into());
+                                if let Some(projection) = self.projection.as_ref() {
+                                    match projection
+                                        .search(
+                                            &table,
+                                            subject,
+                                            &result.vectors[0],
+                                            budget.max_candidates,
+                                        )
+                                        .await
+                                    {
+                                        Ok(revisions) => {
+                                            let rows=sqlx::query("SELECT revision_id,object_id FROM memory_revisions WHERE subject_id=$1 AND revision_id=ANY($2)").bind(subject.0).bind(&revisions).fetch_all(self.store.pool()).await.map_err(db)?;
+                                            let map: BTreeMap<Uuid, Uuid> = rows
+                                                .iter()
+                                                .map(|row| {
+                                                    Ok((
+                                                        row.try_get("revision_id").map_err(db)?,
+                                                        row.try_get("object_id").map_err(db)?,
+                                                    ))
+                                                })
+                                                .collect::<Result<_>>()?;
+                                            let ids: Vec<Uuid> = revisions
+                                                .iter()
+                                                .filter_map(|id| map.get(id).copied())
+                                                .collect();
+                                            fuse(&mut scores, &ids);
+                                            trace.index_queries += 1;
+                                            trace.candidate_channels.push("dense".into());
+                                        }
+                                        Err(_) => {
+                                            degraded.push("dense_projection_unavailable".into())
+                                        }
                                     }
-                                    Err(_) => degraded.push("dense_projection_unavailable".into()),
+                                } else {
+                                    degraded.push("dense_projection_unavailable".into());
                                 }
                                 models.push(provenance);
                             }
@@ -235,7 +239,8 @@ impl LocalRuntime {
                     fuse(&mut scores, &ids);
                 }
             }
-        } else {
+        }
+        if !first_query {
             exact.extend(
                 intent
                     .target
@@ -405,25 +410,24 @@ impl LocalRuntime {
             && exact.is_empty()
             && self.models.rerank.is_some()
             && intent.effort != RecallEffort::Light
+            && let Some(text) = &intent.cues.text
         {
-            if let Some(text) = &intent.cues.text {
-                let documents = results
-                    .iter()
-                    .map(|hit| format!("{}\n{}", hit.memory.content.title, hit.memory.content.text))
-                    .collect::<Vec<_>>();
-                match self.models.rerank(text, &documents).await {
-                    Ok((rerank, provenance)) => {
-                        let old = results;
-                        results = rerank
-                            .ranked
-                            .iter()
-                            .map(|rank| old[rank.index].clone())
-                            .collect();
-                        trace.reranker_calls += 1;
-                        models.push(provenance);
-                    }
-                    Err(_) => degraded.push("reranker_unavailable".into()),
+            let documents = results
+                .iter()
+                .map(|hit| format!("{}\n{}", hit.memory.content.title, hit.memory.content.text))
+                .collect::<Vec<_>>();
+            match self.models.rerank(text, &documents).await {
+                Ok((rerank, provenance)) => {
+                    let old = results;
+                    results = rerank
+                        .ranked
+                        .iter()
+                        .map(|rank| old[rank.index].clone())
+                        .collect();
+                    trace.reranker_calls += 1;
+                    models.push(provenance);
                 }
+                Err(_) => degraded.push("reranker_unavailable".into()),
             }
         }
         results.truncate(intent.result_need.limit);

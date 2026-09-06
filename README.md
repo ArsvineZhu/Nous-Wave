@@ -25,6 +25,12 @@ database/object/index paths, and supply credentials through `NOUS_WAVE_POSTGRES_
 Run `cargo run -p nous-wave -- serve` or `cargo run -p nous-wave -- status`.
 The runtime currently accepts loopback binding only.
 
+Model-provider integration is implemented as bounded HTTP adapters with identity,
+revision, preprocessing and response-schema validation. No embedding, reranking or
+structured-generation endpoint is deployed in the current environment, so provider
+quality/effectiveness evaluation is `NOT_RUN`; raw ingestion, lexical/exact recall,
+association, accessibility and all storage tests remain model-independent.
+
 Verification: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 and `cargo test --workspace`. Real storage integration checks require their explicitly
 documented local dependencies; unexecuted integration checks are not passing evidence.

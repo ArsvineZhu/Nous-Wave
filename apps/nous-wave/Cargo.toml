@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 nous-core.workspace = true
 nous-memory-service.workspace = true
+nous-memory-domain.workspace = true
 tokio.workspace = true
 axum.workspace = true
 clap.workspace = true

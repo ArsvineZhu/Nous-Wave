@@ -4043,6 +4043,7 @@ dependencies = [
  "axum 0.8.9",
  "clap",
  "nous-core",
+ "nous-memory-domain",
  "nous-memory-service",
  "serde",
  "serde_json",

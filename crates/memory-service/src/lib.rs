@@ -4,6 +4,7 @@ use nous_memory_store::MemoryStore;
 use nous_object_store::ObjectStore;
 use serde::Serialize;
 
+pub mod bundle;
 pub mod cycles;
 pub mod material;
 pub mod memory;
@@ -35,6 +36,10 @@ pub struct RuntimeStatus {
 }
 
 impl LocalRuntime {
+    pub fn with_models(mut self, models: models::ModelServices) -> Self {
+        self.models = std::sync::Arc::new(models);
+        self
+    }
     pub(crate) fn projection_failed(&self) -> bool {
         self.projection_failure
     }
@@ -94,17 +99,54 @@ impl LocalRuntime {
                 status("postgres", postgres),
                 status("object_store", objects),
                 projection,
+                model_status("model.embedding", self.models.embedding.as_ref()),
+                model_status("model.rerank", self.models.rerank.as_ref()),
+                model_status("model.generation", self.models.generation.as_ref()),
             ],
-            // Storage connectivity does not establish semantic capability readiness.
-            capabilities: vec!["subject.core", "memory"]
-                .into_iter()
-                .map(|id| CapabilityStatus {
-                    capability_id: id.into(),
-                    status: Readiness::Unavailable,
-                    reason: Some("semantic service implementation not complete".into()),
-                })
-                .collect(),
+            capabilities: vec![
+                CapabilityStatus {
+                    capability_id: "subject.core".into(),
+                    status: if postgres && objects {
+                        Readiness::Ready
+                    } else {
+                        Readiness::Unavailable
+                    },
+                    reason: None,
+                },
+                CapabilityStatus {
+                    capability_id: "memory".into(),
+                    status: if postgres && objects {
+                        if self.projection.is_some() {
+                            Readiness::Ready
+                        } else {
+                            Readiness::Degraded
+                        }
+                    } else {
+                        Readiness::Unavailable
+                    },
+                    reason: None,
+                },
+            ],
         }
+    }
+}
+
+fn model_status(id: &str, endpoint: Option<&models::ModelEndpoint>) -> CapabilityStatus {
+    CapabilityStatus {
+        capability_id: id.into(),
+        status: if endpoint.is_some() {
+            Readiness::Degraded
+        } else {
+            Readiness::Unavailable
+        },
+        reason: Some(
+            if endpoint.is_some() {
+                "configured but provider probe not performed"
+            } else {
+                "not configured"
+            }
+            .into(),
+        ),
     }
 }
 

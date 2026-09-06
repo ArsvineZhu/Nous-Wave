@@ -1,6 +1,7 @@
 use crate::{RetrievalProjection, projection_error};
 use arrow_array::{
-    Array, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray, types::Float32Type,
+    Array, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray,
+    types::Float32Type,
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
@@ -167,6 +168,83 @@ impl RetrievalProjection {
             }
         }
         Ok(revisions)
+    }
+
+    pub async fn search_rows(
+        &self,
+        table_name: &str,
+        subject: SubjectId,
+        vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<VectorRow>> {
+        validate_table(table_name)?;
+        if limit == 0 || limit > 10000 || vector.is_empty() || vector.iter().any(|v| !v.is_finite())
+        {
+            return Err(Error::Invalid("invalid dense search bounds".into()));
+        }
+        let table = self
+            .connection
+            .open_table(format!("{table_name}_{}", subject.0.simple()))
+            .execute()
+            .await
+            .map_err(projection_error)?;
+        let batches = table
+            .query()
+            .only_if(format!("subject_id = '{}'", subject.0))
+            .limit(limit)
+            .nearest_to(vector)
+            .map_err(projection_error)?
+            .execute()
+            .await
+            .map_err(projection_error)?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(projection_error)?;
+        let mut rows = vec![];
+        for batch in batches {
+            let objects = batch
+                .column_by_name("object_id")
+                .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| Error::Infrastructure("invalid dense projection schema".into()))?;
+            let revisions = batch
+                .column_by_name("revision_id")
+                .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| Error::Infrastructure("invalid dense projection schema".into()))?;
+            let vectors = batch
+                .column_by_name("vector")
+                .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
+                .ok_or_else(|| {
+                    Error::Infrastructure("invalid dense projection vector column".into())
+                })?;
+            for index in 0..batch.num_rows() {
+                let values = vectors.value(index);
+                let values = values
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .ok_or_else(|| {
+                        Error::Infrastructure("invalid dense projection vector values".into())
+                    })?;
+                let object = objects
+                    .value(index)
+                    .parse()
+                    .map_err(|e: uuid::Error| Error::Infrastructure(e.to_string()))?;
+                let revision = revisions
+                    .value(index)
+                    .parse()
+                    .map_err(|e: uuid::Error| Error::Infrastructure(e.to_string()))?;
+                let vector = values.values().to_vec();
+                if vector.iter().any(|value| !value.is_finite()) {
+                    return Err(Error::Infrastructure("nonfinite retained embedding".into()));
+                }
+                rows.push(VectorRow {
+                    subject,
+                    object,
+                    revision,
+                    vector,
+                });
+            }
+        }
+        Ok(rows)
     }
 
     pub async fn remove_subject(&self, subject: SubjectId) -> Result<()> {

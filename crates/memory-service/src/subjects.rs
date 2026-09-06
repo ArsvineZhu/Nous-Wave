@@ -9,6 +9,7 @@ use uuid::Uuid;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SeedContent {
     Inline { content: String, media_type: String },
+    InlineBytes { bytes: Vec<u8>, media_type: String },
     Artifact { artifact_id: Uuid },
 }
 
@@ -53,6 +54,11 @@ impl LocalRuntime {
         }
         if input.label.as_ref().is_some_and(|label| label.len() > 1024) {
             return Err(Error::Invalid("subject label exceeds 1024 bytes".into()));
+        }
+        if matches!(&input.character_seed.content, SeedContent::Artifact { .. }) {
+            return Err(Error::Invalid(
+                "CreateSubject Character Seed must be supplied inline".into(),
+            ));
         }
         let subject = SubjectId::default();
         let prepared = self.prepare_seed(subject, &input.character_seed).await?;
@@ -165,6 +171,24 @@ impl LocalRuntime {
                     artifact: Uuid::now_v7(),
                     hash,
                     size: content.len() as i64,
+                    media_type: media_type.clone(),
+                })
+            }
+            SeedContent::InlineBytes { bytes, media_type } => {
+                if bytes.is_empty()
+                    || bytes.len() as u64 > self.max_upload_bytes
+                    || media_type.is_empty()
+                    || media_type.len() > 256
+                {
+                    return Err(Error::Invalid(
+                        "inline Character Seed bytes or media type are invalid".into(),
+                    ));
+                }
+                let hash = self.objects.put(bytes.clone()).await?;
+                Ok(PreparedSeed::New {
+                    artifact: Uuid::now_v7(),
+                    hash,
+                    size: bytes.len() as i64,
                     media_type: media_type.clone(),
                 })
             }

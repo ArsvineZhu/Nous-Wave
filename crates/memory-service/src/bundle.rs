@@ -12,7 +12,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleManifest {
@@ -27,6 +27,26 @@ pub struct BundleManifest {
 pub struct BundleMemory {
     pub object_id: Uuid,
     pub history: Vec<MemoryView>,
+    pub formation_class: String,
+    pub formation_metadata: serde_json::Value,
+    pub accessibility: BundleAccessibility,
+    pub suppression: Option<BundleSuppression>,
+    pub episode_ids: Vec<Uuid>,
+    pub member_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleAccessibility {
+    pub meaningful_uses: i64,
+    pub last_meaningful_use: Option<DateTime<Utc>>,
+    pub retention_hint: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleSuppression {
+    pub suppressed: bool,
+    pub reason: String,
+    pub changed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +63,29 @@ pub struct BundleDerivation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleUseEvent {
+    pub event_id: Uuid,
+    pub kind: String,
+    pub object_refs: Vec<Uuid>,
+    pub occurred_at: DateTime<Utc>,
+    pub causation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleAssociation {
+    pub evidence_id: Uuid,
+    pub from_kind: String,
+    pub from_id: Uuid,
+    pub to_kind: String,
+    pub to_id: Uuid,
+    pub evidence_class: String,
+    pub support: f64,
+    pub source_id: Option<Uuid>,
+    pub use_event_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubjectBundle {
     pub manifest: BundleManifest,
     pub subject: Subject,
@@ -52,6 +95,8 @@ pub struct SubjectBundle {
     pub memories: Vec<BundleMemory>,
     pub entities: Vec<BundleEntity>,
     pub derivations: Vec<BundleDerivation>,
+    pub use_events: Vec<BundleUseEvent>,
+    pub associations: Vec<BundleAssociation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +152,18 @@ impl LocalRuntime {
     ) -> Result<BundleManifest> {
         let _guard = self.objects.reference_guard(false).await?;
         let root = root.as_ref();
+        let incoherent: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM memory_objects WHERE subject_id=$1 AND availability='regenerating') OR EXISTS(SELECT 1 FROM memory_operation_results WHERE subject_id=$1 AND kind='purge' AND state IN ('physical_pending','running'))",
+        )
+        .bind(subject.0)
+        .fetch_one(self.store.pool())
+        .await
+        .map_err(db)?;
+        if incoherent {
+            return Err(Error::Conflict(
+                "subject has in-flight destructive or regeneration state".into(),
+            ));
+        }
         tokio::fs::create_dir_all(root.join("objects"))
             .await
             .map_err(|e| Error::Infrastructure(e.to_string()))?;
@@ -126,10 +183,50 @@ impl LocalRuntime {
         for object_id in object_ids {
             let history = self.memory_history(subject, object_id).await?;
             revision_count += history.len();
-            memories.push(BundleMemory { object_id, history });
+            let object = sqlx::query("SELECT formation_class,formation_metadata FROM memory_objects WHERE subject_id=$1 AND object_id=$2")
+                .bind(subject.0).bind(object_id).fetch_one(self.store.pool()).await.map_err(db)?;
+            let accessibility = sqlx::query("SELECT meaningful_uses,last_meaningful_use,retention_hint FROM accessibility_state WHERE object_id=$1")
+                .bind(object_id).fetch_one(self.store.pool()).await.map_err(db)?;
+            let suppression = sqlx::query(
+                "SELECT suppressed,reason,changed_at FROM suppression_state WHERE object_id=$1",
+            )
+            .bind(object_id)
+            .fetch_optional(self.store.pool())
+            .await
+            .map_err(db)?
+            .map(|row| {
+                Ok(BundleSuppression {
+                    suppressed: row.try_get("suppressed").map_err(db)?,
+                    reason: row.try_get("reason").map_err(db)?,
+                    changed_at: row.try_get("changed_at").map_err(db)?,
+                })
+            })
+            .transpose()?;
+            let episode_ids = sqlx::query_scalar("SELECT episode_id FROM episode_members WHERE subject_id=$1 AND member_id=$2 ORDER BY episode_id")
+                .bind(subject.0).bind(object_id).fetch_all(self.store.pool()).await.map_err(db)?;
+            let member_ids = sqlx::query_scalar("SELECT member_id FROM episode_members WHERE subject_id=$1 AND episode_id=$2 ORDER BY member_id")
+                .bind(subject.0).bind(object_id).fetch_all(self.store.pool()).await.map_err(db)?;
+            memories.push(BundleMemory {
+                object_id,
+                history,
+                formation_class: object.try_get("formation_class").map_err(db)?,
+                formation_metadata: object.try_get("formation_metadata").map_err(db)?,
+                accessibility: BundleAccessibility {
+                    meaningful_uses: accessibility.try_get("meaningful_uses").map_err(db)?,
+                    last_meaningful_use: accessibility
+                        .try_get("last_meaningful_use")
+                        .map_err(db)?,
+                    retention_hint: accessibility.try_get("retention_hint").map_err(db)?,
+                },
+                suppression,
+                episode_ids,
+                member_ids,
+            });
         }
         let entities = sqlx::query("SELECT entity_id,entity_kind,label,identity_key FROM memory_entities WHERE subject_id=$1 ORDER BY entity_id").bind(subject.0).fetch_all(self.store.pool()).await.map_err(db)?.into_iter().map(|row| Ok(BundleEntity { entity_id: row.try_get("entity_id").map_err(db)?, entity_kind: row.try_get("entity_kind").map_err(db)?, label: row.try_get("label").map_err(db)?, identity_key: row.try_get("identity_key").map_err(db)? })).collect::<Result<Vec<_>>>()?;
         let derivations = self.export_derivations(subject).await?;
+        let use_events = self.export_use_events(subject).await?;
+        let associations = self.export_associations(subject).await?;
         let mut hashes = Vec::new();
         for artifact in &artifacts {
             let bytes = self.artifact_bytes(subject, artifact.artifact_id).await?;
@@ -156,6 +253,8 @@ impl LocalRuntime {
             memories,
             entities,
             derivations,
+            use_events,
+            associations,
         };
         write_json(root, "manifest.json", &bundle.manifest).await?;
         write_json(root, "subject.json", &bundle.subject).await?;
@@ -165,6 +264,8 @@ impl LocalRuntime {
         write_json(root, "memories.json", &bundle.memories).await?;
         write_json(root, "entities.json", &bundle.entities).await?;
         write_json(root, "derivations.json", &bundle.derivations).await?;
+        write_json(root, "use-events.json", &bundle.use_events).await?;
+        write_json(root, "associations.json", &bundle.associations).await?;
         Ok(manifest)
     }
 
@@ -189,6 +290,8 @@ impl LocalRuntime {
         let memories: Vec<BundleMemory> = read_json(root, "memories.json").await?;
         let entities: Vec<BundleEntity> = read_json(root, "entities.json").await?;
         let derivations: Vec<BundleDerivation> = read_json(root, "derivations.json").await?;
+        let use_events: Vec<BundleUseEvent> = read_json(root, "use-events.json").await?;
+        let associations: Vec<BundleAssociation> = read_json(root, "associations.json").await?;
         for hash in &manifest.object_hashes {
             let bytes = tokio::fs::read(root.join("objects").join(hash))
                 .await
@@ -224,6 +327,8 @@ impl LocalRuntime {
             derivations.iter().map(|item| item.derivation.derivation_id),
             remap,
         );
+        let use_event_map = remap_ids(use_events.iter().map(|item| item.event_id), remap);
+        let association_map = remap_ids(associations.iter().map(|item| item.evidence_id), remap);
         let sources: Vec<_> = sources
             .iter()
             .map(|source| {
@@ -300,7 +405,55 @@ impl LocalRuntime {
                         .map(|id| map_id(&derivation_map, *id))
                         .collect();
                 }
+                mapped.episode_ids = bundle
+                    .episode_ids
+                    .iter()
+                    .map(|id| map_id(&object_map, *id))
+                    .collect();
+                mapped.member_ids = bundle
+                    .member_ids
+                    .iter()
+                    .map(|id| map_id(&object_map, *id))
+                    .collect();
                 mapped
+            })
+            .collect();
+        let use_events: Vec<_> = use_events
+            .into_iter()
+            .map(|mut event| {
+                event.event_id = map_id(&use_event_map, event.event_id);
+                event.object_refs = event
+                    .object_refs
+                    .into_iter()
+                    .map(|id| map_id(&object_map, id))
+                    .collect();
+                event.causation_id = event.causation_id.map(|id| map_id(&use_event_map, id));
+                event
+            })
+            .collect();
+        let associations: Vec<_> = associations
+            .into_iter()
+            .map(|mut evidence| {
+                evidence.evidence_id = map_id(&association_map, evidence.evidence_id);
+                evidence.from_id = remap_node_id(
+                    &evidence.from_kind,
+                    evidence.from_id,
+                    &object_map,
+                    &source_map,
+                    &artifact_map,
+                    &entity_map,
+                );
+                evidence.to_id = remap_node_id(
+                    &evidence.to_kind,
+                    evidence.to_id,
+                    &object_map,
+                    &source_map,
+                    &artifact_map,
+                    &entity_map,
+                );
+                evidence.source_id = evidence.source_id.map(|id| map_id(&source_map, id));
+                evidence.use_event_id = evidence.use_event_id.map(|id| map_id(&use_event_map, id));
+                evidence
             })
             .collect();
         let mut tx = self.store.pool().begin().await.map_err(db)?;
@@ -353,6 +506,14 @@ impl LocalRuntime {
         for bundle_memory in &memories {
             self.insert_memory(&mut tx, imported_subject, bundle_memory)
                 .await?;
+        }
+        for event in &use_events {
+            sqlx::query("INSERT INTO cognitive_use_events(event_id,subject_id,cycle_id,kind,object_refs,occurred_at,causation_id) VALUES($1,$2,NULL,$3,$4,$5,$6)")
+                .bind(event.event_id).bind(imported_subject.0).bind(&event.kind).bind(&event.object_refs).bind(event.occurred_at).bind(event.causation_id).execute(&mut *tx).await.map_err(db)?;
+        }
+        for evidence in &associations {
+            sqlx::query("INSERT INTO association_evidence(evidence_id,subject_id,from_kind,from_id,to_kind,to_id,evidence_class,support,source_id,use_event_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+                .bind(evidence.evidence_id).bind(imported_subject.0).bind(&evidence.from_kind).bind(evidence.from_id).bind(&evidence.to_kind).bind(evidence.to_id).bind(&evidence.evidence_class).bind(evidence.support).bind(evidence.source_id).bind(evidence.use_event_id).bind(evidence.created_at).execute(&mut *tx).await.map_err(db)?;
         }
         tx.commit().await.map_err(db)?;
         drop(_guard);
@@ -415,13 +576,14 @@ impl LocalRuntime {
             .history
             .last()
             .ok_or_else(|| Error::Invalid("memory bundle has empty history".into()))?;
-        sqlx::query("INSERT INTO memory_objects(object_id,subject_id,object_kind,scope,availability,superseded_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)")
-            .bind(bundle.object_id).bind(subject.0).bind(enum_name(&current.content.kind)?).bind(&current.content.scope).bind(&current.availability).bind(current.superseded_by).bind(current.recorded_at).execute(&mut **tx).await.map_err(db)?;
-        sqlx::query("INSERT INTO accessibility_state(object_id) VALUES($1)")
-            .bind(bundle.object_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(db)?;
+        sqlx::query("INSERT INTO memory_objects(object_id,subject_id,object_kind,scope,formation_class,formation_metadata,availability,superseded_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+            .bind(bundle.object_id).bind(subject.0).bind(enum_name(&current.content.kind)?).bind(&current.content.scope).bind(&bundle.formation_class).bind(&bundle.formation_metadata).bind(&current.availability).bind(current.superseded_by).bind(current.recorded_at).execute(&mut **tx).await.map_err(db)?;
+        sqlx::query("INSERT INTO accessibility_state(object_id,meaningful_uses,last_meaningful_use,retention_hint) VALUES($1,$2,$3,$4)")
+            .bind(bundle.object_id).bind(bundle.accessibility.meaningful_uses).bind(bundle.accessibility.last_meaningful_use).bind(bundle.accessibility.retention_hint).execute(&mut **tx).await.map_err(db)?;
+        if let Some(suppression) = &bundle.suppression {
+            sqlx::query("INSERT INTO suppression_state(object_id,suppressed,reason,changed_at) VALUES($1,$2,$3,$4)")
+                .bind(bundle.object_id).bind(suppression.suppressed).bind(&suppression.reason).bind(suppression.changed_at).execute(&mut **tx).await.map_err(db)?;
+        }
         for view in &bundle.history {
             let range = view.content.occurred.as_ref();
             let digest = blake3::hash(view.content.text.as_bytes())
@@ -451,6 +613,14 @@ impl LocalRuntime {
             .execute(&mut **tx)
             .await
             .map_err(db)?;
+        for episode in &bundle.episode_ids {
+            sqlx::query("INSERT INTO episode_members(subject_id,episode_id,member_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+                .bind(subject.0).bind(episode).bind(bundle.object_id).execute(&mut **tx).await.map_err(db)?;
+        }
+        for member in &bundle.member_ids {
+            sqlx::query("INSERT INTO episode_members(subject_id,episode_id,member_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+                .bind(subject.0).bind(bundle.object_id).bind(member).execute(&mut **tx).await.map_err(db)?;
+        }
         Ok(())
     }
 
@@ -549,6 +719,43 @@ impl LocalRuntime {
         }
         Ok(result)
     }
+
+    async fn export_use_events(&self, subject: SubjectId) -> Result<Vec<BundleUseEvent>> {
+        let rows = sqlx::query("SELECT event_id,kind,object_refs,occurred_at,causation_id FROM cognitive_use_events WHERE subject_id=$1 AND kind IN ('FOLLOWED','REFERENCED_OR_ACTED_ON') ORDER BY occurred_at,event_id")
+            .bind(subject.0).fetch_all(self.store.pool()).await.map_err(db)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(BundleUseEvent {
+                    event_id: row.try_get("event_id").map_err(db)?,
+                    kind: row.try_get("kind").map_err(db)?,
+                    object_refs: row.try_get("object_refs").map_err(db)?,
+                    occurred_at: row.try_get("occurred_at").map_err(db)?,
+                    causation_id: row.try_get("causation_id").map_err(db)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn export_associations(&self, subject: SubjectId) -> Result<Vec<BundleAssociation>> {
+        let rows = sqlx::query("SELECT evidence_id,from_kind,from_id,to_kind,to_id,evidence_class,support,source_id,use_event_id,created_at FROM association_evidence WHERE subject_id=$1 ORDER BY evidence_id")
+            .bind(subject.0).fetch_all(self.store.pool()).await.map_err(db)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(BundleAssociation {
+                    evidence_id: row.try_get("evidence_id").map_err(db)?,
+                    from_kind: row.try_get("from_kind").map_err(db)?,
+                    from_id: row.try_get("from_id").map_err(db)?,
+                    to_kind: row.try_get("to_kind").map_err(db)?,
+                    to_id: row.try_get("to_id").map_err(db)?,
+                    evidence_class: row.try_get("evidence_class").map_err(db)?,
+                    support: row.try_get("support").map_err(db)?,
+                    source_id: row.try_get("source_id").map_err(db)?,
+                    use_event_id: row.try_get("use_event_id").map_err(db)?,
+                    created_at: row.try_get("created_at").map_err(db)?,
+                })
+            })
+            .collect()
+    }
 }
 
 fn remap_ids<I>(ids: I, remap: bool) -> HashMap<Uuid, Uuid>
@@ -561,4 +768,20 @@ where
 }
 fn map_id(map: &HashMap<Uuid, Uuid>, id: Uuid) -> Uuid {
     map.get(&id).copied().unwrap_or(id)
+}
+fn remap_node_id(
+    kind: &str,
+    id: Uuid,
+    objects: &HashMap<Uuid, Uuid>,
+    sources: &HashMap<Uuid, Uuid>,
+    artifacts: &HashMap<Uuid, Uuid>,
+    entities: &HashMap<Uuid, Uuid>,
+) -> Uuid {
+    match kind {
+        "memory" => map_id(objects, id),
+        "source" => map_id(sources, id),
+        "artifact" => map_id(artifacts, id),
+        "entity" => map_id(entities, id),
+        _ => id,
+    }
 }

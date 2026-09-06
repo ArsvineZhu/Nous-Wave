@@ -1,7 +1,8 @@
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::StatusCode,
+    body::Body,
+    extract::{Multipart, Path, Query, State},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -11,7 +12,7 @@ use nous_memory_service::{
     LocalRuntime,
     bundle::{ImportRequest, ImportResult},
     cycles::UseFeedback,
-    material::{IngestMaterial, SubmitDerivation, ToolObservation},
+    material::{IngestMaterial, SubmitDerivation, ToolObservation, UploadMetadata},
     memory::CorrectMemory,
     operations::ConsolidateRequest,
     purge::PurgeRequest,
@@ -28,11 +29,21 @@ pub fn routes() -> Router<LocalRuntime> {
         .route("/v1/subjects/{subject}/seed", post(replace))
         .route("/v1/subjects/{subject}/seed/history", get(history))
         .route("/v1/subjects/{subject}/material", post(ingest))
+        .route("/v1/subjects/{subject}/material/upload", post(upload))
         .route(
             "/v1/subjects/{subject}/material/{source}/status",
             get(material_status),
         )
         .route("/v1/subjects/{subject}/artifacts/{artifact}", get(artifact))
+        .route(
+            "/v1/subjects/{subject}/artifacts/{artifact}/content",
+            get(artifact_content),
+        )
+        .route(
+            "/v1/subjects/{subject}/artifacts/{artifact}/lineage",
+            get(artifact_lineage),
+        )
+        .route("/v1/subjects/{subject}/sources/{source}", get(source_show))
         .route("/v1/subjects/{subject}/derivations", post(derivation))
         .route(
             "/v1/subjects/{subject}/tool-observation",
@@ -53,6 +64,18 @@ pub fn routes() -> Router<LocalRuntime> {
             post(close_cycle),
         )
         .route("/v1/subjects/{subject}/memory/{object}", get(memory))
+        .route(
+            "/v1/subjects/{subject}/memory/{object}/history",
+            get(memory_history),
+        )
+        .route(
+            "/v1/subjects/{subject}/memory/{object}/episode-membership",
+            get(episode_membership),
+        )
+        .route(
+            "/v1/subjects/{subject}/memory/{object}/associations",
+            get(associations),
+        )
         .route(
             "/v1/subjects/{subject}/memory/{object}/correct",
             post(correct_memory),
@@ -154,6 +177,84 @@ async fn ingest(
         Json(runtime.ingest(SubjectId(subject), input).await?),
     ))
 }
+
+async fn upload(
+    State(runtime): State<LocalRuntime>,
+    Path(subject): Path<Uuid>,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, Problem> {
+    let mut metadata: Option<UploadMetadata> = None;
+    let mut accepted = None;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| Problem(Error::Invalid(format!("invalid multipart body: {error}"))))?
+    {
+        let name = field
+            .name()
+            .ok_or_else(|| Problem(Error::Invalid("multipart parts need names".into())))?
+            .to_owned();
+        match name.as_str() {
+            "metadata" => {
+                if metadata.is_some() {
+                    return Err(Problem(Error::Invalid(
+                        "multipart metadata part must occur once".into(),
+                    )));
+                }
+                let mut bytes = Vec::new();
+                while let Some(chunk) = field.chunk().await.map_err(|error| {
+                    Problem(Error::Invalid(format!("metadata part failed: {error}")))
+                })? {
+                    if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
+                        return Err(Problem(Error::Invalid(
+                            "multipart metadata exceeds 64 KiB".into(),
+                        )));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                metadata = Some(serde_json::from_slice(&bytes).map_err(|error| {
+                    Problem(Error::Invalid(format!("invalid upload metadata: {error}")))
+                })?);
+            }
+            "content" => {
+                if accepted.is_some() {
+                    return Err(Problem(Error::Invalid(
+                        "multipart content part must occur once".into(),
+                    )));
+                }
+                let metadata = metadata.clone().ok_or_else(|| {
+                    Problem(Error::Invalid(
+                        "multipart metadata must precede content".into(),
+                    ))
+                })?;
+                let stream = futures::stream::try_unfold(field, |mut field| async move {
+                    match field.chunk().await {
+                        Ok(Some(bytes)) => Ok(Some((bytes.to_vec(), field))),
+                        Ok(None) => Ok(None),
+                        Err(error) => Err(Error::Invalid(format!("content part failed: {error}"))),
+                    }
+                });
+                accepted = Some(
+                    runtime
+                        .ingest_stream(SubjectId(subject), metadata, stream)
+                        .await
+                        .map_err(Problem)?,
+                );
+            }
+            _ => {
+                return Err(Problem(Error::Invalid(
+                    "multipart accepts only metadata and content parts".into(),
+                )));
+            }
+        }
+    }
+    let accepted = accepted.ok_or_else(|| {
+        Problem(Error::Invalid(
+            "multipart upload requires metadata and content parts".into(),
+        ))
+    })?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)))
+}
 async fn tool_observation(
     State(runtime): State<LocalRuntime>,
     Path(subject): Path<Uuid>,
@@ -181,6 +282,46 @@ async fn artifact(
     Path((subject, artifact)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, Problem> {
     Ok(Json(runtime.artifact(SubjectId(subject), artifact).await?))
+}
+async fn source_show(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, source)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, Problem> {
+    Ok(Json(runtime.source_show(SubjectId(subject), source).await?))
+}
+async fn artifact_lineage(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, artifact)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, Problem> {
+    Ok(Json(
+        runtime
+            .artifact_lineage(SubjectId(subject), artifact)
+            .await?,
+    ))
+}
+async fn artifact_content(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, artifact)): Path<(Uuid, Uuid)>,
+) -> Result<Response, Problem> {
+    let metadata = runtime.artifact(SubjectId(subject), artifact).await?;
+    let bytes = runtime.artifact_bytes(SubjectId(subject), artifact).await?;
+    let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&metadata.media_type)
+            .map_err(|error| Problem(Error::Infrastructure(error.to_string())))?,
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&metadata.byte_size.to_string())
+            .map_err(|error| Problem(Error::Infrastructure(error.to_string())))?,
+    );
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{}\"", metadata.content_hash))
+            .map_err(|error| Problem(Error::Infrastructure(error.to_string())))?,
+    );
+    Ok(response)
 }
 async fn derivation(
     State(runtime): State<LocalRuntime>,
@@ -267,6 +408,34 @@ async fn memory(
             .await?,
     ))
 }
+async fn memory_history(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, object)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, Problem> {
+    Ok(Json(
+        runtime.memory_history(SubjectId(subject), object).await?,
+    ))
+}
+async fn episode_membership(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, object)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, Problem> {
+    Ok(Json(
+        runtime
+            .episode_membership(SubjectId(subject), object)
+            .await?,
+    ))
+}
+async fn associations(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, object)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, Problem> {
+    Ok(Json(
+        runtime
+            .association_evidence(SubjectId(subject), object)
+            .await?,
+    ))
+}
 async fn correct_memory(
     State(runtime): State<LocalRuntime>,
     Path((subject, object)): Path<(Uuid, Uuid)>,
@@ -320,8 +489,11 @@ async fn process(
     Path(subject): Path<Uuid>,
     Json(limit): Json<Option<usize>>,
 ) -> Result<impl IntoResponse, Problem> {
-    let _ = subject;
-    Ok(Json(runtime.process_pending(limit.unwrap_or(16)).await?))
+    Ok(Json(
+        runtime
+            .process_pending_for_subject(SubjectId(subject), limit.unwrap_or(16))
+            .await?,
+    ))
 }
 #[derive(Deserialize)]
 struct BundlePath {

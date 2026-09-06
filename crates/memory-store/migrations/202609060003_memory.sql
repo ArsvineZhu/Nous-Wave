@@ -6,6 +6,8 @@ CREATE TABLE memory_objects (
     object_kind text NOT NULL CHECK(object_kind IN ('EPISODE','EPISODIC','SEMANTIC','PROCEDURAL','CONCEPTUAL','REFERENCE')),
     scope text NOT NULL,
     formation_key text,
+    formation_class text NOT NULL DEFAULT 'SOURCE_REFERENCE' CHECK(formation_class IN ('SOURCE_REFERENCE','HOST_EPISODE','MODEL_EXTRACT','DUPLICATE_CONSOLIDATION','EPISODE_ABSTRACTION')),
+    formation_metadata jsonb NOT NULL DEFAULT '{}',
     availability text NOT NULL DEFAULT 'ready' CHECK(availability IN ('ready','regenerating','failed')),
     superseded_by uuid,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -103,18 +105,6 @@ CREATE TABLE memory_entity_mentions (
     PRIMARY KEY(entity_id,revision_id),
     FOREIGN KEY(subject_id,entity_id) REFERENCES memory_entities(subject_id,entity_id),
     FOREIGN KEY(subject_id,revision_id) REFERENCES memory_revisions(subject_id,revision_id)
-);
-CREATE TABLE memory_relations (
-    relation_id uuid PRIMARY KEY,
-    subject_id uuid NOT NULL,
-    from_object uuid NOT NULL,
-    to_object uuid NOT NULL,
-    relation_kind text NOT NULL,
-    support_revision uuid NOT NULL,
-    UNIQUE(subject_id,relation_id),
-    FOREIGN KEY(subject_id,from_object) REFERENCES memory_objects(subject_id,object_id),
-    FOREIGN KEY(subject_id,to_object) REFERENCES memory_objects(subject_id,object_id),
-    FOREIGN KEY(subject_id,support_revision) REFERENCES memory_revisions(subject_id,revision_id)
 );
 CREATE TABLE suppression_state (
     object_id uuid PRIMARY KEY REFERENCES memory_objects,

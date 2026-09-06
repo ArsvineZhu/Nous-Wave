@@ -20,6 +20,8 @@ chrono.workspace = true
 sqlx.workspace = true
 blake3.workspace = true
 reqwest.workspace = true
+fastembed.workspace = true
+postgresql_embedded.workspace = true
 futures.workspace = true
 
 [dev-dependencies]

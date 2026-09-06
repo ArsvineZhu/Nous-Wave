@@ -153,7 +153,7 @@ impl LocalRuntime {
         };
         let revisions:Vec<Uuid>=sqlx::query_scalar("WITH RECURSIVE affected(id) AS (SELECT r.revision_id FROM memory_revisions r WHERE r.subject_id=$1 AND ($2 OR r.object_id=$3 OR EXISTS(SELECT 1 FROM memory_revision_sources s WHERE s.revision_id=r.revision_id AND s.source_id=ANY($4)) OR EXISTS(SELECT 1 FROM memory_revision_artifacts a WHERE a.revision_id=r.revision_id AND a.artifact_id=ANY($5)) OR EXISTS(SELECT 1 FROM memory_revision_derivations d WHERE d.revision_id=r.revision_id AND d.derivation_id=ANY($6))) UNION SELECT p.revision_id FROM affected a JOIN memory_revision_parents p ON p.parent_revision_id=a.id) SELECT DISTINCT id FROM affected")
             .bind(subject.0).bind(whole).bind(direct).bind(&sources).bind(&artifacts).bind(&derivations).fetch_all(&mut *tx).await.map_err(db)?;
-        let affected_heads=sqlx::query("SELECT o.object_id,o.object_kind,o.scope,h.revision_id FROM memory_objects o JOIN memory_current_heads h USING(object_id) WHERE o.subject_id=$1 AND h.revision_id=ANY($2)")
+        let affected_heads=sqlx::query("SELECT o.object_id,o.object_kind,o.scope,o.formation_class,o.formation_metadata,h.revision_id FROM memory_objects o JOIN memory_current_heads h USING(object_id) WHERE o.subject_id=$1 AND h.revision_id=ANY($2)")
             .bind(subject.0).bind(&revisions).fetch_all(&mut *tx).await.map_err(db)?;
         let mut deleted = BTreeSet::<Uuid>::new();
         let mut regenerating = vec![];
@@ -165,6 +165,9 @@ impl LocalRuntime {
                 deleted.insert(object);
             } else {
                 regenerating.push(object);
+                let formation_class: String = row.try_get("formation_class").map_err(db)?;
+                let formation_metadata: serde_json::Value =
+                    row.try_get("formation_metadata").map_err(db)?;
                 sqlx::query(
                     "UPDATE memory_objects SET availability='regenerating' WHERE object_id=$1",
                 )
@@ -173,7 +176,7 @@ impl LocalRuntime {
                 .await
                 .map_err(db)?;
                 sqlx::query("INSERT INTO processing_obligations(obligation_id,subject_id,kind,payload_version,payload) VALUES($1,$2,'regenerate',1,$3)")
-                    .bind(Uuid::now_v7()).bind(subject.0).bind(serde_json::json!({"object_id":object,"source_refs":remaining,"kind":row.try_get::<String,_>("object_kind").map_err(db)?,"scope":row.try_get::<String,_>("scope").map_err(db)?})).execute(&mut *tx).await.map_err(db)?;
+                    .bind(Uuid::now_v7()).bind(subject.0).bind(serde_json::json!({"object_id":object,"source_refs":remaining,"kind":row.try_get::<String,_>("object_kind").map_err(db)?,"scope":row.try_get::<String,_>("scope").map_err(db)?,"formation_class":formation_class,"formation_metadata":formation_metadata})).execute(&mut *tx).await.map_err(db)?;
             }
         }
         if whole {
@@ -206,7 +209,6 @@ impl LocalRuntime {
         .execute(&mut *tx)
         .await
         .map_err(db)?;
-        sqlx::query("DELETE FROM memory_relations WHERE subject_id=$1 AND ($2 OR from_object=ANY($3) OR to_object=ANY($3) OR support_revision=ANY($4))").bind(subject.0).bind(whole).bind(&deleted).bind(&revisions).execute(&mut *tx).await.map_err(db)?;
         sqlx::query("DELETE FROM episode_members WHERE subject_id=$1 AND ($2 OR episode_id=ANY($3) OR member_id=ANY($3))").bind(subject.0).bind(whole).bind(&deleted).execute(&mut *tx).await.map_err(db)?;
         sqlx::query("DELETE FROM processing_obligations WHERE subject_id=$1 AND ($2 OR source_id=ANY($3) OR payload->>'revision_id'=ANY($4::text[]) OR kind='projection' OR (kind<>'regenerate' AND payload->>'object_id'=ANY($5::text[])))")
             .bind(subject.0).bind(whole).bind(&sources).bind(revisions.iter().map(Uuid::to_string).collect::<Vec<_>>()).bind(deleted.iter().map(Uuid::to_string).collect::<Vec<_>>()).execute(&mut *tx).await.map_err(db)?;

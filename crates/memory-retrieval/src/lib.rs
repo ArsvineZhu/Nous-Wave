@@ -1,6 +1,7 @@
 use nous_core::{Error, Result};
 pub mod association;
 pub mod dense;
+pub mod residual;
 
 #[derive(Clone)]
 pub struct RetrievalProjection {

@@ -9,6 +9,7 @@ use nous_memory_service::{
     subjects::{CreateSubject, SeedContent, SeedInput},
 };
 use uuid::Uuid;
+mod support;
 
 fn intent(target: Option<Uuid>, text: Option<&str>, cycle: Option<Uuid>) -> RecallIntent {
     RecallIntent {
@@ -65,11 +66,11 @@ async fn ingest(runtime: &LocalRuntime, subject: SubjectId, text: &str, key: &st
 }
 
 #[tokio::test]
-#[ignore = "requires NOUS_WAVE_TEST_DATABASE_URL pointing at disposable PostgreSQL 18"]
 async fn memory_formation_recall_learning_history_and_cycle() {
+    let (_postgres, database_url, _postgres_root) = support::database().await;
     let directory = tempfile::tempdir().unwrap();
     let runtime = LocalRuntime::open(
-        &std::env::var("NOUS_WAVE_TEST_DATABASE_URL").expect("disposable database"),
+        &database_url,
         4,
         directory.path().join("objects").to_str().unwrap(),
         Some(directory.path().join("lance").to_str().unwrap()),

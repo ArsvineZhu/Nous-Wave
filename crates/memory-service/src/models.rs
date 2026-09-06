@@ -1,8 +1,82 @@
 use nous_core::{Error, Result};
 use nous_material::ProcessorProvenance;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use uuid::Uuid;
+
+const LOCAL_MODEL_IDENTITY: &str = "intfloat/multilingual-e5-small";
+const LOCAL_MODEL_REVISION: &str = "fastembed-6.0.2";
+const LOCAL_PREPROCESSING: &str = "e5-query-or-passage-l2-normalized";
+
+#[derive(Clone)]
+pub struct LocalEmbeddingModel {
+    model: Arc<Mutex<fastembed::TextEmbedding>>,
+}
+
+impl LocalEmbeddingModel {
+    pub async fn load(cache_dir: PathBuf) -> Result<Self> {
+        tokio::task::spawn_blocking(move || {
+            let options =
+                fastembed::TextInitOptions::new(fastembed::EmbeddingModel::MultilingualE5Small)
+                    .with_cache_dir(cache_dir)
+                    .with_show_download_progress(false)
+                    .with_intra_threads(2);
+            let model = fastembed::TextEmbedding::try_new(options).map_err(|error| {
+                Error::Unavailable(format!("local embedding model failed to load: {error}"))
+            })?;
+            Ok(Self {
+                model: Arc::new(Mutex::new(model)),
+            })
+        })
+        .await
+        .map_err(|error| Error::Infrastructure(error.to_string()))?
+    }
+
+    pub async fn embed(&self, texts: &[String]) -> Result<(EmbeddingResult, ProcessorProvenance)> {
+        let model = self.model.clone();
+        let inputs = texts.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = model
+                .lock()
+                .map_err(|_| Error::Infrastructure("local embedding lock poisoned".into()))?;
+            let vectors = guard
+                .embed(inputs, None)
+                .map_err(|error| Error::Unavailable(format!("local embedding failed: {error}")))?;
+            let vectors = vectors
+                .into_iter()
+                .map(|mut vector| {
+                    normalize_vector(&mut vector);
+                    vector
+                })
+                .collect::<Vec<_>>();
+            let config_digest = blake3::hash(
+                format!("{LOCAL_MODEL_IDENTITY}:{LOCAL_MODEL_REVISION}:{LOCAL_PREPROCESSING}")
+                    .as_bytes(),
+            )
+            .to_hex()
+            .to_string();
+            Ok((
+                EmbeddingResult {
+                    model: LOCAL_MODEL_IDENTITY.into(),
+                    revision: LOCAL_MODEL_REVISION.into(),
+                    vectors,
+                },
+                ProcessorProvenance {
+                    identity: LOCAL_MODEL_IDENTITY.into(),
+                    revision: LOCAL_MODEL_REVISION.into(),
+                    preprocessing: LOCAL_PREPROCESSING.into(),
+                    config_digest,
+                },
+            ))
+        })
+        .await
+        .map_err(|error| Error::Infrastructure(error.to_string()))?
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEndpoint {
@@ -50,6 +124,7 @@ pub struct ModelServices {
     pub embedding: Option<ModelEndpoint>,
     pub rerank: Option<ModelEndpoint>,
     pub generation: Option<ModelEndpoint>,
+    pub local_embedding: Option<LocalEmbeddingModel>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -110,10 +185,23 @@ impl ModelServices {
             embedding: embedding.filter(|m| m.enabled),
             rerank: rerank.filter(|m| m.enabled),
             generation: generation.filter(|m| m.enabled),
+            local_embedding: None,
         })
     }
 
+    pub fn with_local_embedding(mut self, model: LocalEmbeddingModel) -> Self {
+        self.local_embedding = Some(model);
+        self
+    }
+
+    pub fn embedding_available(&self) -> bool {
+        self.local_embedding.is_some() || self.embedding.is_some()
+    }
+
     pub async fn embed(&self, texts: &[String]) -> Result<(EmbeddingResult, ProcessorProvenance)> {
+        if let Some(model) = &self.local_embedding {
+            return model.embed(texts).await;
+        }
         let config = self
             .embedding
             .as_ref()
@@ -132,9 +220,12 @@ impl ModelServices {
             }
             bytes.extend_from_slice(&chunk);
         }
-        let result: EmbeddingResult = serde_json::from_slice(&bytes)
+        let mut result: EmbeddingResult = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Invalid("invalid embedding response schema".into()))?;
         validate_embedding(&result, config, texts.len())?;
+        for vector in &mut result.vectors {
+            normalize_vector(vector);
+        }
         Ok((result, config.provenance()?))
     }
 
@@ -257,6 +348,19 @@ fn validate_embedding(
         ));
     }
     Ok(())
+}
+
+fn normalize_vector(vector: &mut [f32]) {
+    let norm = vector
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    if norm.is_finite() && norm > f64::EPSILON {
+        for value in vector {
+            *value = (*value as f64 / norm) as f32;
+        }
+    }
 }
 
 #[cfg(test)]

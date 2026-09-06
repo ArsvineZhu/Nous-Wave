@@ -174,6 +174,11 @@ struct Postgres {
 struct Objects {
     backend: String,
     root: String,
+    #[serde(default = "default_max_upload_bytes")]
+    max_upload_bytes: u64,
+}
+fn default_max_upload_bytes() -> u64 {
+    8 * 1024 * 1024 * 1024
 }
 #[derive(Deserialize)]
 struct Retrieval {
@@ -192,6 +197,8 @@ struct Models {
 struct Model {
     #[serde(default)]
     enabled: bool,
+    #[serde(default = "default_model_mode")]
+    mode: String,
     #[serde(default)]
     endpoint: String,
     #[serde(default)]
@@ -204,19 +211,26 @@ struct Model {
     timeout_seconds: u64,
     #[serde(default = "default_model_response")]
     max_response_bytes: usize,
+    #[serde(default)]
+    cache_dir: String,
 }
 impl Default for Model {
     fn default() -> Self {
         Self {
             enabled: false,
+            mode: default_model_mode(),
             endpoint: String::new(),
             model: String::new(),
             revision: default_model_revision(),
             preprocessing: default_preprocessing(),
             timeout_seconds: default_model_timeout(),
             max_response_bytes: default_model_response(),
+            cache_dir: String::new(),
         }
     }
+}
+fn default_model_mode() -> String {
+    "http".into()
 }
 fn default_model_revision() -> String {
     "unconfigured".into()
@@ -270,7 +284,7 @@ async fn run() -> Result<()> {
             "current object repository requires backend=fs".into(),
         ));
     }
-    let runtime = LocalRuntime::open(
+    let runtime = LocalRuntime::open_with_options(
         &config.postgres.url,
         config.postgres.max_connections,
         &config.object_store.root,
@@ -278,13 +292,31 @@ async fn run() -> Result<()> {
             .microsystems
             .memory
             .then_some(config.retrieval.lancedb_uri.as_str()),
+        config.microsystems.memory,
+        config.object_store.max_upload_bytes,
     )
     .await?
-    .with_models(nous_memory_service::models::ModelServices::new(
-        Some(model_endpoint(config.models.embedding)),
-        Some(model_endpoint(config.models.rerank)),
-        Some(model_endpoint(config.models.generation)),
-    )?);
+    .with_models({
+        let embedding = config.models.embedding;
+        let local = if embedding.enabled && embedding.mode == "local" {
+            let cache_dir = if embedding.cache_dir.is_empty() {
+                PathBuf::from("models")
+            } else {
+                PathBuf::from(&embedding.cache_dir)
+            };
+            Some(nous_memory_service::models::LocalEmbeddingModel::load(cache_dir).await?)
+        } else {
+            None
+        };
+        let services = nous_memory_service::models::ModelServices::new(
+            Some(model_endpoint(embedding)),
+            Some(model_endpoint(config.models.rerank)),
+            Some(model_endpoint(config.models.generation)),
+        )?;
+        local.map_or(services.clone(), |model| {
+            services.with_local_embedding(model)
+        })
+    });
     match cli.command {
         Command::Material { subject, input } => println!("{}", serde_json::to_string(&runtime.ingest(nous_core::SubjectId(subject), read_input(input).await?).await?).map_err(|e|Error::Infrastructure(e.to_string()))?),
         Command::Recall { subject, input } => println!("{}", serde_json::to_string(&runtime.recall(nous_core::SubjectId(subject), read_input(input).await?).await?).map_err(|e|Error::Infrastructure(e.to_string()))?),

@@ -55,7 +55,6 @@ memory_current_heads
 episodes
 episode_members
 memory_entities
-memory_relations
 association_evidence
 association_state
 accessibility_state

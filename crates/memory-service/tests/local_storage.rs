@@ -1,11 +1,10 @@
 use nous_memory_service::LocalRuntime;
+mod support;
 
 /// Use a disposable PostgreSQL 18 database. This test installs the real schema.
 #[tokio::test]
-#[ignore = "requires NOUS_WAVE_TEST_DATABASE_URL pointing at a disposable PostgreSQL 18 database"]
 async fn migrations_cas_projection_and_restart() {
-    let url =
-        std::env::var("NOUS_WAVE_TEST_DATABASE_URL").expect("explicit disposable database URL");
+    let (_postgres, url, _postgres_root) = support::database().await;
     let directory = tempfile::tempdir().unwrap();
     let objects = directory.path().join("objects");
     let index = directory.path().join("lancedb");

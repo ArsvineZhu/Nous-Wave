@@ -43,13 +43,11 @@ CREATE TABLE artifacts (
     content_hash text NOT NULL CHECK(content_hash ~ '^[0-9a-f]{64}$'),
     media_type text NOT NULL,
     byte_size bigint NOT NULL CHECK(byte_size >= 0),
-    inline_payload bytea,
     origin_class text NOT NULL,
     semantic_class text NOT NULL,
     epistemic_class text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    UNIQUE(subject_id, artifact_id),
-    CHECK(inline_payload IS NULL OR octet_length(inline_payload) = byte_size)
+    UNIQUE(subject_id, artifact_id)
 );
 CREATE INDEX artifacts_content_hash ON artifacts(content_hash);
 

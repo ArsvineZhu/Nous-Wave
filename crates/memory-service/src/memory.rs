@@ -157,6 +157,36 @@ impl LocalRuntime {
         Ok(history)
     }
 
+    pub async fn episode_membership(
+        &self,
+        subject: SubjectId,
+        object: Uuid,
+    ) -> Result<serde_json::Value> {
+        self.memory(subject, object, None).await?;
+        let as_episode: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT member_id FROM episode_members WHERE subject_id=$1 AND episode_id=$2 ORDER BY member_id",
+        )
+        .bind(subject.0)
+        .bind(object)
+        .fetch_all(self.store.pool())
+        .await
+        .map_err(db)?;
+        let in_episodes: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT episode_id FROM episode_members WHERE subject_id=$1 AND member_id=$2 ORDER BY episode_id",
+        )
+        .bind(subject.0)
+        .bind(object)
+        .fetch_all(self.store.pool())
+        .await
+        .map_err(db)?;
+        Ok(serde_json::json!({
+            "api_version": 1,
+            "object_id": object,
+            "members": as_episode,
+            "episodes": in_episodes,
+        }))
+    }
+
     pub async fn correct_memory(
         &self,
         subject: SubjectId,
@@ -240,6 +270,11 @@ impl LocalRuntime {
     }
 
     pub(crate) async fn require_memory(&self, subject: SubjectId) -> Result<()> {
+        if !self.memory_capability {
+            return Err(Error::Unavailable(
+                "memory capability is unavailable".into(),
+            ));
+        }
         if !self.subject(subject).await?.memory_enabled {
             return Err(Error::Unavailable("memory disabled for subject".into()));
         }
@@ -285,8 +320,9 @@ pub(crate) async fn form_memory(
         return Ok((object, head));
     }
     let object = Uuid::now_v7();
-    sqlx::query("INSERT INTO memory_objects(object_id,subject_id,object_kind,scope,formation_key) VALUES($1,$2,$3,$4,$5)")
-        .bind(object).bind(subject.0).bind(enum_name(&draft.kind)?).bind(&draft.scope).bind(formation_key).execute(&mut **tx).await.map_err(db)?;
+    let (formation_class, formation_metadata) = formation_recipe(formation_key, draft);
+    sqlx::query("INSERT INTO memory_objects(object_id,subject_id,object_kind,scope,formation_key,formation_class,formation_metadata) VALUES($1,$2,$3,$4,$5,$6,$7)")
+        .bind(object).bind(subject.0).bind(enum_name(&draft.kind)?).bind(&draft.scope).bind(formation_key).bind(formation_class).bind(formation_metadata).execute(&mut **tx).await.map_err(db)?;
     sqlx::query("INSERT INTO accessibility_state(object_id) VALUES($1)")
         .bind(object)
         .execute(&mut **tx)
@@ -294,6 +330,37 @@ pub(crate) async fn form_memory(
         .map_err(db)?;
     let revision = write_revision(tx, subject, object, draft, "memory formation", None).await?;
     Ok((object, revision))
+}
+
+fn formation_recipe(formation_key: &str, draft: &MemoryDraft) -> (&'static str, serde_json::Value) {
+    if let Some(rest) = formation_key.strip_prefix("episode:") {
+        return (
+            "HOST_EPISODE",
+            serde_json::json!({"episode_key": rest, "scope": draft.scope}),
+        );
+    }
+    if formation_key.contains(":proposal:") {
+        return (
+            "MODEL_EXTRACT",
+            serde_json::json!({"formation_key": formation_key}),
+        );
+    }
+    if formation_key.starts_with("consolidation:") {
+        return (
+            "DUPLICATE_CONSOLIDATION",
+            serde_json::json!({"formation_key": formation_key}),
+        );
+    }
+    if formation_key.starts_with("abstraction:") {
+        return (
+            "EPISODE_ABSTRACTION",
+            serde_json::json!({"formation_key": formation_key}),
+        );
+    }
+    (
+        "SOURCE_REFERENCE",
+        serde_json::json!({"formation_key": formation_key}),
+    )
 }
 
 pub(crate) async fn write_revision(

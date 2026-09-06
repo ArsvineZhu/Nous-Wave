@@ -64,6 +64,11 @@ pub struct ActivationTrace {
     pub edges_visited: usize,
     pub max_depth: usize,
     pub remaining_frontier: usize,
+    pub activation_seed_count: usize,
+    pub actual_flow_edges: usize,
+    pub positive_flow_entropy: f64,
+    pub emergent_support_ratio: f64,
+    pub budget_truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +156,8 @@ impl ActivationState {
             neighbors.sort_by_key(|edge| (edge.to, edge.evidence_id));
         }
         let mut trace = ActivationTrace::default();
+        let mut positive_masses = Vec::new();
+        let mut emergent_mass = 0.0_f64;
         while trace.states_expanded < state_budget && trace.edges_visited < edge_budget {
             let Some(current) = self.frontier.pop() else {
                 break;
@@ -197,6 +204,10 @@ impl ActivationState {
                 if mass < config.min_activation {
                     continue;
                 }
+                positive_masses.push(mass);
+                if !self.seeds.contains(&edge.to) {
+                    emergent_mass += mass;
+                }
                 let key = (current.seed, edge.to);
                 if self
                     .best
@@ -230,6 +241,29 @@ impl ActivationState {
             }
         }
         trace.remaining_frontier = self.frontier.len();
+        trace.activation_seed_count = self.seeds.len();
+        trace.actual_flow_edges = positive_masses.len();
+        trace.budget_truncated = trace.remaining_frontier > 0
+            && (trace.states_expanded >= state_budget || trace.edges_visited >= edge_budget);
+        let total_mass = positive_masses.iter().sum::<f64>();
+        if positive_masses.len() >= 2 && total_mass.is_finite() && total_mass > 0.0 {
+            let entropy = positive_masses
+                .iter()
+                .map(|mass| {
+                    let probability = *mass / total_mass;
+                    -probability * probability.ln()
+                })
+                .sum::<f64>();
+            trace.positive_flow_entropy =
+                (entropy / (positive_masses.len() as f64).ln()).clamp(0.0, 1.0);
+        } else {
+            trace.positive_flow_entropy = 0.0;
+        }
+        trace.emergent_support_ratio = if total_mass > 0.0 {
+            (emergent_mass / total_mass).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         Ok(trace)
     }
 

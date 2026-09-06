@@ -16,7 +16,7 @@ max_connections = 12
 [object_store]
 backend = "fs"
 root = "./data/objects"
-inline_payload_max_bytes = 65536
+max_upload_bytes = 8589934592
 
 [retrieval]
 lancedb_uri = "./data/lancedb"
@@ -55,8 +55,10 @@ use_decay = 0.5
 
 [models.embedding]
 enabled = false
+mode = "local"
 endpoint = "http://127.0.0.1:8001"
 model = "configured-by-operator"
+cache_dir = "./models"
 
 [models.rerank]
 enabled = false

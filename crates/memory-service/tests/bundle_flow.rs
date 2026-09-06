@@ -9,11 +9,11 @@ use nous_memory_service::{
     subjects::{CreateSubject, SeedContent, SeedInput},
 };
 use uuid::Uuid;
+mod support;
 
 #[tokio::test]
-#[ignore = "requires NOUS_WAVE_TEST_DATABASE_URL pointing at disposable PostgreSQL 18"]
 async fn bundle_round_trip_verifies_hashes_and_new_identity() {
-    let url = std::env::var("NOUS_WAVE_TEST_DATABASE_URL").expect("disposable database");
+    let (_postgres, url, _postgres_root) = support::database().await;
     let root = tempfile::tempdir().unwrap();
     let runtime = LocalRuntime::open(
         &url,

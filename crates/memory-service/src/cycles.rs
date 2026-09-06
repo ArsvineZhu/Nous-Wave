@@ -272,9 +272,6 @@ impl LocalRuntime {
                 NodeKind::Artifact => {
                     "SELECT EXISTS(SELECT 1 FROM artifacts WHERE subject_id=$1 AND artifact_id=$2)"
                 }
-                NodeKind::Relation => {
-                    "SELECT EXISTS(SELECT 1 FROM memory_relations WHERE subject_id=$1 AND relation_id=$2)"
-                }
             };
             let exists: bool = sqlx::query_scalar(query)
                 .bind(subject.0)
@@ -293,6 +290,38 @@ impl LocalRuntime {
             .bind(id).bind(subject.0).bind(enum_name(&from.kind)?).bind(from.id).bind(enum_name(&to.kind)?).bind(to.id).bind(source).execute(&mut *tx).await.map_err(db)?;
         tx.commit().await.map_err(db)?;
         Ok(id)
+    }
+
+    pub async fn association_evidence(
+        &self,
+        subject: SubjectId,
+        object: Uuid,
+    ) -> Result<serde_json::Value> {
+        self.require_memory(subject).await?;
+        let rows = sqlx::query(
+            "SELECT evidence_id,from_kind,from_id,to_kind,to_id,evidence_class,support,source_id,use_event_id,created_at FROM association_evidence WHERE subject_id=$1 AND ((from_kind='memory' AND from_id=$2) OR (to_kind='memory' AND to_id=$2)) ORDER BY created_at,evidence_id LIMIT 512",
+        )
+        .bind(subject.0)
+        .bind(object)
+        .fetch_all(self.store.pool())
+        .await
+        .map_err(db)?;
+        let evidence = rows
+            .into_iter()
+            .map(|row| {
+                Ok(serde_json::json!({
+                    "evidence_id": row.try_get::<Uuid, _>("evidence_id").map_err(db)?,
+                    "from": {"kind": row.try_get::<String, _>("from_kind").map_err(db)?, "id": row.try_get::<Uuid, _>("from_id").map_err(db)?},
+                    "to": {"kind": row.try_get::<String, _>("to_kind").map_err(db)?, "id": row.try_get::<Uuid, _>("to_id").map_err(db)?},
+                    "evidence_class": row.try_get::<String, _>("evidence_class").map_err(db)?,
+                    "support": row.try_get::<f64, _>("support").map_err(db)?,
+                    "source_id": row.try_get::<Option<Uuid>, _>("source_id").map_err(db)?,
+                    "use_event_id": row.try_get::<Option<Uuid>, _>("use_event_id").map_err(db)?,
+                    "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at").map_err(db)?,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(serde_json::json!({"api_version": 1, "object_id": object, "evidence": evidence}))
     }
 
     pub(crate) async fn expand_graph(

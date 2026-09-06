@@ -12,6 +12,7 @@ use nous_memory_domain::{
     recall::{NodeKind, NodeRef, RecallEffort, RecallEffortTrace, RecallIntent, RecallObjective},
 };
 use nous_memory_retrieval::association::{ActivationConfig, ActivationSupport};
+use nous_memory_retrieval::residual;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::{
@@ -161,7 +162,7 @@ impl LocalRuntime {
                     trace.index_queries += 1;
                     trace.candidate_channels.push("document_section".into());
                     fuse(&mut scores, &ids);
-                    if self.models.embedding.is_some()
+                    if self.models.embedding_available()
                         && self.projection.is_some()
                         && (intent.effort != RecallEffort::Light
                             || scores.len() < intent.result_need.limit)
@@ -177,7 +178,7 @@ impl LocalRuntime {
                                 );
                                 if let Some(projection) = self.projection.as_ref() {
                                     match projection
-                                        .search(
+                                        .search_rows(
                                             &table,
                                             subject,
                                             &result.vectors[0],
@@ -185,7 +186,11 @@ impl LocalRuntime {
                                         )
                                         .await
                                     {
-                                        Ok(revisions) => {
+                                        Ok(probe_rows) => {
+                                            let revisions = probe_rows
+                                                .iter()
+                                                .map(|row| row.revision)
+                                                .collect::<Vec<_>>();
                                             let rows=sqlx::query("SELECT revision_id,object_id FROM memory_revisions WHERE subject_id=$1 AND revision_id=ANY($2)").bind(subject.0).bind(&revisions).fetch_all(self.store.pool()).await.map_err(db)?;
                                             let map: BTreeMap<Uuid, Uuid> = rows
                                                 .iter()
@@ -202,7 +207,79 @@ impl LocalRuntime {
                                                 .collect();
                                             fuse(&mut scores, &ids);
                                             trace.index_queries += 1;
+                                            trace.direct_dense_queries += 1;
                                             trace.candidate_channels.push("dense".into());
+
+                                            let max_rounds = match intent.effort {
+                                                RecallEffort::Light => 0,
+                                                RecallEffort::Normal => 1,
+                                                RecallEffort::Deep => 2,
+                                                RecallEffort::Maximum => 3,
+                                            };
+                                            if max_rounds > 0 {
+                                                let similarities = probe_rows
+                                                    .iter()
+                                                    .map(|row| {
+                                                        row.vector
+                                                            .iter()
+                                                            .zip(&result.vectors[0])
+                                                            .map(|(a, b)| a * b)
+                                                            .sum::<f32>()
+                                                    })
+                                                    .collect::<Vec<_>>();
+                                                let vectors = probe_rows
+                                                    .iter()
+                                                    .map(|row| row.vector.clone())
+                                                    .collect::<Vec<_>>();
+                                                let plan = residual::plan(
+                                                    &result.vectors[0],
+                                                    &vectors,
+                                                    &similarities,
+                                                    max_rounds,
+                                                );
+                                                trace.residual_energy_ratios =
+                                                    plan.energy_ratios.clone();
+                                                trace.residual_stop_reason =
+                                                    plan.stop_reason.clone();
+                                                for vector in plan.vectors {
+                                                    let revisions = projection
+                                                        .search(
+                                                            &table,
+                                                            subject,
+                                                            &vector,
+                                                            budget.max_candidates,
+                                                        )
+                                                        .await?;
+                                                    let rows=sqlx::query("SELECT revision_id,object_id FROM memory_revisions WHERE subject_id=$1 AND revision_id=ANY($2)").bind(subject.0).bind(&revisions).fetch_all(self.store.pool()).await.map_err(db)?;
+                                                    let map: BTreeMap<Uuid, Uuid> = rows
+                                                        .iter()
+                                                        .map(|row| {
+                                                            Ok((
+                                                                row.try_get("revision_id")
+                                                                    .map_err(db)?,
+                                                                row.try_get("object_id")
+                                                                    .map_err(db)?,
+                                                            ))
+                                                        })
+                                                        .collect::<Result<_>>()?;
+                                                    let ids: Vec<Uuid> = revisions
+                                                        .iter()
+                                                        .filter_map(|id| map.get(id).copied())
+                                                        .collect();
+                                                    let added = ids
+                                                        .iter()
+                                                        .filter(|id| !scores.contains_key(id))
+                                                        .count();
+                                                    fuse(&mut scores, &ids);
+                                                    trace.residual_candidates_added += added;
+                                                    trace.residual_rounds += 1;
+                                                    trace.index_queries += 1;
+                                                    trace.candidate_channels.push(format!(
+                                                        "residual_dense_{}",
+                                                        trace.residual_rounds
+                                                    ));
+                                                }
+                                            }
                                         }
                                         Err(_) => {
                                             degraded.push("dense_projection_unavailable".into())
@@ -215,7 +292,7 @@ impl LocalRuntime {
                             }
                             Err(_) => degraded.push("embedding_service_unavailable".into()),
                         }
-                    } else if self.models.embedding.is_none() {
+                    } else if !self.models.embedding_available() {
                         degraded.push("embedding_not_configured".into());
                     }
                 }
@@ -260,6 +337,7 @@ impl LocalRuntime {
                     || intent.effort >= RecallEffort::Deep));
         let mut continuation = false;
         if broaden {
+            let direct_scores = scores.clone();
             trace.recall_rounds += 1;
             let mut seeds = intent.cues.references.clone();
             seeds.extend(&intent.target);
@@ -302,16 +380,28 @@ impl LocalRuntime {
             trace.edges_visited = activation.edges_visited;
             trace.association_nodes_activated = activation.states_expanded;
             trace.max_graph_depth = activation.max_depth;
+            trace.activation_seed_count = activation.activation_seed_count;
+            trace.actual_flow_edges = activation.actual_flow_edges;
+            trace.positive_flow_entropy = activation.positive_flow_entropy;
+            trace.emergent_support_ratio = activation.emergent_support_ratio;
+            trace.activation_budget_truncated = activation.budget_truncated;
+            trace.association_observability = association_observability(&activation);
             trace.candidate_channels.push("association".into());
             let mut active: Vec<_> = state.activation.scores().into_iter().collect();
             active.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-            let ids: Vec<Uuid> = active
+            for (node, association_score) in active
                 .iter()
                 .filter(|(node, _)| node.kind == NodeKind::Memory)
-                .take(budget.max_candidates)
-                .map(|(node, _)| node.id)
-                .collect();
-            fuse(&mut scores, &ids);
+            {
+                let direct_score = direct_scores
+                    .get(&node.id)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0);
+                let effective = association_score.clamp(0.0, 1.0)
+                    * (0.35 + 0.65 * trace.association_observability);
+                scores.insert(node.id, 1.0 - (1.0 - direct_score) * (1.0 - effective));
+            }
             for (node, _) in active
                 .into_iter()
                 .filter(|(node, _)| node.kind != NodeKind::Memory)
@@ -332,7 +422,7 @@ impl LocalRuntime {
                 | RecallObjective::Comparison
         ) {
             let seeds: Vec<Uuid> = scores.keys().copied().take(budget.max_candidates).collect();
-            let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM (SELECT episode_id AS id FROM episode_members WHERE subject_id=$1 AND member_id=ANY($2) UNION SELECT member_id FROM episode_members WHERE subject_id=$1 AND episode_id=ANY($2) UNION SELECT to_object FROM memory_relations WHERE subject_id=$1 AND from_object=ANY($2) UNION SELECT from_object FROM memory_relations WHERE subject_id=$1 AND to_object=ANY($2)) related ORDER BY id LIMIT $3")
+            let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM (SELECT episode_id AS id FROM episode_members WHERE subject_id=$1 AND member_id=ANY($2) UNION SELECT member_id FROM episode_members WHERE subject_id=$1 AND episode_id=ANY($2)) related ORDER BY id LIMIT $3")
                 .bind(subject.0).bind(seeds).bind(budget.max_candidates as i64).fetch_all(self.store.pool()).await.map_err(db)?;
             trace.index_queries += 1;
             trace.candidate_channels.push("episodic_relation".into());
@@ -480,9 +570,6 @@ impl LocalRuntime {
             NodeKind::Entity => {
                 "SELECT DISTINCT r.object_id FROM memory_entity_mentions e JOIN memory_revisions r USING(revision_id) WHERE e.subject_id=$1 AND e.entity_id=$2 ORDER BY r.object_id LIMIT $3"
             }
-            NodeKind::Relation => {
-                "SELECT from_object FROM memory_relations WHERE subject_id=$1 AND relation_id=$2 UNION SELECT to_object FROM memory_relations WHERE subject_id=$1 AND relation_id=$2 LIMIT $3"
-            }
         };
         sqlx::query_scalar(query)
             .bind(subject.0)
@@ -535,4 +622,19 @@ fn fuse(scores: &mut BTreeMap<Uuid, f64>, ids: &[Uuid]) {
             *scores.entry(*id).or_default() += 1.0 / (60.0 + rank as f64 + 1.0);
         }
     }
+}
+
+fn association_observability(trace: &nous_memory_retrieval::association::ActivationTrace) -> f64 {
+    if trace.actual_flow_edges == 0 {
+        return 0.0;
+    }
+    let seeds = trace.activation_seed_count.max(1) as f64;
+    let edge_sufficiency = 1.0 - (-(trace.actual_flow_edges as f64) / (2.0 * seeds)).exp();
+    let completion_factor = if trace.budget_truncated { 0.5 } else { 1.0 };
+    (edge_sufficiency
+        * trace.emergent_support_ratio.max(1e-6)
+        * trace.positive_flow_entropy.max(1e-6)
+        * completion_factor)
+        .powf(0.25)
+        .clamp(0.0, 1.0)
 }

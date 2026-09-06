@@ -31,6 +31,27 @@ struct Claim {
 
 impl LocalRuntime {
     pub async fn process_pending(&self, limit: usize) -> Result<ProcessingResult> {
+        self.process_pending_inner(None, limit).await
+    }
+
+    pub async fn process_pending_for_subject(
+        &self,
+        subject: SubjectId,
+        limit: usize,
+    ) -> Result<ProcessingResult> {
+        self.process_pending_inner(Some(subject), limit).await
+    }
+
+    async fn process_pending_inner(
+        &self,
+        subject: Option<SubjectId>,
+        limit: usize,
+    ) -> Result<ProcessingResult> {
+        if !self.memory_capability {
+            return Err(Error::Unavailable(
+                "memory capability is unavailable".into(),
+            ));
+        }
         if limit == 0 || limit > 1000 {
             return Err(Error::Invalid("processing limit must be 1..1000".into()));
         }
@@ -41,7 +62,7 @@ impl LocalRuntime {
         };
         self.resume_purges(1).await?;
         let mut kinds = vec!["ingest", "regenerate"];
-        if self.models.embedding.is_some() {
+        if self.models.embedding_available() {
             kinds.push("embedding");
         }
         if self.projection.is_some() {
@@ -49,8 +70,8 @@ impl LocalRuntime {
         }
         for _ in 0..limit {
             let attempt = Uuid::now_v7();
-            let row = sqlx::query("WITH candidate AS (SELECT obligation_id FROM processing_obligations WHERE kind=ANY($1) AND (state='pending' OR (state='running' AND lease_until<clock_timestamp())) ORDER BY created_at,obligation_id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE processing_obligations o SET state='running',attempt_id=$2,lease_until=clock_timestamp()+interval '5 minutes',attempts=attempts+1,updated_at=clock_timestamp() FROM candidate c WHERE o.obligation_id=c.obligation_id RETURNING o.*")
-                .bind(&kinds).bind(attempt).fetch_optional(self.store.pool()).await.map_err(db)?;
+            let row = sqlx::query("WITH candidate AS (SELECT obligation_id FROM processing_obligations WHERE kind=ANY($1) AND ($3::uuid IS NULL OR subject_id=$3) AND (state='pending' OR (state='running' AND lease_until<clock_timestamp())) ORDER BY created_at,obligation_id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE processing_obligations o SET state='running',attempt_id=$2,lease_until=clock_timestamp()+interval '5 minutes',attempts=attempts+1,updated_at=clock_timestamp() FROM candidate c WHERE o.obligation_id=c.obligation_id RETURNING o.*")
+                .bind(&kinds).bind(attempt).bind(subject.map(|value| value.0)).fetch_optional(self.store.pool()).await.map_err(db)?;
             let Some(row) = row else { break };
             let claim = Claim {
                 id: row.try_get("obligation_id").map_err(db)?,
@@ -204,6 +225,13 @@ impl LocalRuntime {
         };
         let (reference, _) =
             form_memory(&mut tx, claim.subject, &draft, &format!("source:{source}")).await?;
+        for (from_kind, from_id, to_kind, to_id) in [
+            ("source", source, "memory", reference),
+            ("memory", reference, "source", source),
+        ] {
+            sqlx::query("INSERT INTO association_evidence(evidence_id,subject_id,from_kind,from_id,to_kind,to_id,evidence_class,support,source_id) SELECT $1,$2,$3,$4,$5,$6,'explicit_source',1,$7 WHERE NOT EXISTS(SELECT 1 FROM association_evidence WHERE subject_id=$2 AND from_kind=$3 AND from_id=$4 AND to_kind=$5 AND to_id=$6 AND evidence_class='explicit_source' AND source_id=$7)")
+                .bind(Uuid::now_v7()).bind(claim.subject.0).bind(from_kind).bind(from_id).bind(to_kind).bind(to_id).bind(source).execute(&mut *tx).await.map_err(db)?;
+        }
         if let Some(group) = metadata
             .get("episode_key")
             .and_then(serde_json::Value::as_str)
@@ -249,6 +277,34 @@ impl LocalRuntime {
                 sqlx::query("INSERT INTO memory_revision_parents(subject_id,revision_id,parent_revision_id,relation) VALUES($1,$2,$3,'WORLD_EVOLUTION')").bind(claim.subject.0).bind(new_head).bind(head).execute(&mut *tx).await.map_err(db)?;
             }
             sqlx::query("INSERT INTO episode_members(subject_id,episode_id,member_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(claim.subject.0).bind(episode_id).bind(reference).execute(&mut *tx).await.map_err(db)?;
+            for (from_kind, from_id, to_kind, to_id) in [
+                ("memory", episode_id, "memory", reference),
+                ("memory", reference, "memory", episode_id),
+            ] {
+                sqlx::query("INSERT INTO association_evidence(evidence_id,subject_id,from_kind,from_id,to_kind,to_id,evidence_class,support) SELECT $1,$2,$3,$4,$5,$6,'episode',1 WHERE NOT EXISTS(SELECT 1 FROM association_evidence WHERE subject_id=$2 AND from_kind=$3 AND from_id=$4 AND to_kind=$5 AND to_id=$6 AND evidence_class='episode')")
+                    .bind(Uuid::now_v7()).bind(claim.subject.0).bind(from_kind).bind(from_id).bind(to_kind).bind(to_id).execute(&mut *tx).await.map_err(db)?;
+            }
+            let ordered: Vec<Uuid> = sqlx::query_scalar("SELECT o.object_id FROM memory_objects o JOIN memory_current_heads h USING(object_id) JOIN memory_revision_sources s ON s.revision_id=h.revision_id JOIN source_records r ON r.source_id=s.source_id WHERE o.subject_id=$1 AND o.object_kind<>'EPISODE' AND s.source_id=ANY($2) GROUP BY o.object_id ORDER BY min(r.recorded_at),o.object_id")
+                .bind(claim.subject.0)
+                .bind(&episode.source_refs)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(db)?;
+            for pair in ordered.windows(2) {
+                for (left, right, support) in
+                    [(pair[0], pair[1], 1.0_f64), (pair[1], pair[0], 0.35_f64)]
+                {
+                    sqlx::query("INSERT INTO association_evidence(evidence_id,subject_id,from_kind,from_id,to_kind,to_id,evidence_class,support) SELECT $1,$2,'memory',$3,'memory',$4,'temporal_adjacency',$5 WHERE NOT EXISTS(SELECT 1 FROM association_evidence WHERE subject_id=$2 AND from_kind='memory' AND from_id=$3 AND to_kind='memory' AND to_id=$4 AND evidence_class='temporal_adjacency')")
+                        .bind(Uuid::now_v7())
+                        .bind(claim.subject.0)
+                        .bind(left)
+                        .bind(right)
+                        .bind(support)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db)?;
+                }
+            }
         }
         let mut proposal_index = 0;
         for (result, provenance) in proposals {
@@ -279,13 +335,22 @@ impl LocalRuntime {
                     },
                     ..draft.clone()
                 };
-                form_memory(
+                let (proposed_object, _) = form_memory(
                     &mut tx,
                     claim.subject,
                     &inferred,
                     &format!("source:{source}:proposal:{proposal_index}"),
                 )
                 .await?;
+                for supported_source in &inferred.source_refs {
+                    for (from_kind, from_id, to_kind, to_id) in [
+                        ("source", *supported_source, "memory", proposed_object),
+                        ("memory", proposed_object, "source", *supported_source),
+                    ] {
+                        sqlx::query("INSERT INTO association_evidence(evidence_id,subject_id,from_kind,from_id,to_kind,to_id,evidence_class,support,source_id) SELECT $1,$2,$3,$4,$5,$6,'explicit_source',1,$7 WHERE NOT EXISTS(SELECT 1 FROM association_evidence WHERE subject_id=$2 AND from_kind=$3 AND from_id=$4 AND to_kind=$5 AND to_id=$6 AND evidence_class='explicit_source' AND source_id=$7)")
+                            .bind(Uuid::now_v7()).bind(claim.subject.0).bind(from_kind).bind(from_id).bind(to_kind).bind(to_id).bind(supported_source).execute(&mut *tx).await.map_err(db)?;
+                    }
+                }
                 proposal_index += 1;
             }
         }
@@ -341,6 +406,19 @@ impl LocalRuntime {
         let kind: MemoryKind =
             serde_json::from_value(claim.payload.get("kind").cloned().unwrap_or_default())
                 .map_err(|_| Error::Invalid("invalid regeneration kind".into()))?;
+        let formation_class = claim
+            .payload
+            .get("formation_class")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("SOURCE_REFERENCE");
+        if matches!(
+            formation_class,
+            "DUPLICATE_CONSOLIDATION" | "EPISODE_ABSTRACTION"
+        ) && sources.len() < 2
+        {
+            self.delete_unsupported_memory(claim, object).await?;
+            return Ok(());
+        }
         let scope = claim
             .payload
             .get("scope")
@@ -395,13 +473,14 @@ impl LocalRuntime {
             None
         } else {
             let (result, provenance) = self.models.extract(&material).await?;
-            let proposal = result
+            let Some(proposal) = result
                 .memories
                 .into_iter()
                 .find(|proposal| proposal.kind == kind)
-                .ok_or_else(|| {
-                    Error::Invalid("no supported replacement for purged interpretation".into())
-                })?;
+            else {
+                self.delete_unsupported_memory(claim, object).await?;
+                return Ok(());
+            };
             draft.title = proposal.title;
             draft.text = proposal.text;
             draft.source_refs = proposal.source_refs;
@@ -437,6 +516,70 @@ impl LocalRuntime {
         .execute(&mut *tx)
         .await
         .map_err(db)?;
+        tx.commit().await.map_err(db)
+    }
+
+    async fn delete_unsupported_memory(&self, claim: &Claim, object: Uuid) -> Result<()> {
+        let mut tx = self.store.pool().begin().await.map_err(db)?;
+        lock_subject(&mut tx, claim.subject).await?;
+        finish_claim(&mut tx, claim).await?;
+        let revisions: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT revision_id FROM memory_revisions WHERE subject_id=$1 AND object_id=$2",
+        )
+        .bind(claim.subject.0)
+        .bind(object)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db)?;
+        sqlx::query("DELETE FROM association_evidence WHERE subject_id=$1 AND ((from_kind='memory' AND from_id=$2) OR (to_kind='memory' AND to_id=$2))")
+            .bind(claim.subject.0).bind(object).execute(&mut *tx).await.map_err(db)?;
+        sqlx::query(
+            "DELETE FROM episode_members WHERE subject_id=$1 AND (episode_id=$2 OR member_id=$2)",
+        )
+        .bind(claim.subject.0)
+        .bind(object)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+        sqlx::query("DELETE FROM cognitive_use_events WHERE subject_id=$1 AND object_refs @> ARRAY[$2]::uuid[]")
+            .bind(claim.subject.0).bind(object).execute(&mut *tx).await.map_err(db)?;
+        sqlx::query("DELETE FROM memory_revision_parents WHERE revision_id=ANY($1) OR parent_revision_id=ANY($1)")
+            .bind(&revisions).execute(&mut *tx).await.map_err(db)?;
+        for query in [
+            "DELETE FROM memory_current_heads WHERE revision_id=ANY($1)",
+            "DELETE FROM memory_revision_sources WHERE revision_id=ANY($1)",
+            "DELETE FROM memory_revision_artifacts WHERE revision_id=ANY($1)",
+            "DELETE FROM memory_revision_derivations WHERE revision_id=ANY($1)",
+            "DELETE FROM memory_entity_mentions WHERE revision_id=ANY($1)",
+            "DELETE FROM retained_embeddings WHERE revision_id=ANY($1)",
+        ] {
+            sqlx::query(query)
+                .bind(&revisions)
+                .execute(&mut *tx)
+                .await
+                .map_err(db)?;
+        }
+        sqlx::query("DELETE FROM memory_revisions WHERE revision_id=ANY($1)")
+            .bind(&revisions)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        sqlx::query("DELETE FROM suppression_state WHERE object_id=$1")
+            .bind(object)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        sqlx::query("DELETE FROM accessibility_state WHERE object_id=$1")
+            .bind(object)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        sqlx::query("DELETE FROM memory_objects WHERE subject_id=$1 AND object_id=$2")
+            .bind(claim.subject.0)
+            .bind(object)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
         tx.commit().await.map_err(db)
     }
 

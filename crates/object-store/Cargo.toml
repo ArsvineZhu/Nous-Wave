@@ -11,3 +11,4 @@ opendal.workspace = true
 blake3.workspace = true
 tokio.workspace = true
 futures.workspace = true
+uuid.workspace = true

@@ -10,7 +10,6 @@ pub enum NodeKind {
     Entity,
     Source,
     Artifact,
-    Relation,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeRef {
@@ -98,4 +97,15 @@ pub struct RecallEffortTrace {
     pub model_assisted_calls: usize,
     pub wall_time_ms: f64,
     pub reused_candidates: usize,
+    pub direct_dense_queries: usize,
+    pub residual_rounds: usize,
+    pub residual_energy_ratios: Vec<f64>,
+    pub residual_candidates_added: usize,
+    pub residual_stop_reason: Option<String>,
+    pub activation_seed_count: usize,
+    pub actual_flow_edges: usize,
+    pub positive_flow_entropy: f64,
+    pub emergent_support_ratio: f64,
+    pub association_observability: f64,
+    pub activation_budget_truncated: bool,
 }

@@ -20,6 +20,10 @@ pub struct LocalRuntime {
     pub store: MemoryStore,
     pub objects: ObjectStore,
     pub projection: Option<RetrievalProjection>,
+    /// Runtime-wide availability of the compiled Memory MicroSystem.
+    /// Subject-level `memory_enabled` remains a separate persisted decision.
+    pub memory_capability: bool,
+    pub max_upload_bytes: u64,
     projection_failure: bool,
     pub models: std::sync::Arc<models::ModelServices>,
     pub(crate) process_id: uuid::Uuid,
@@ -49,21 +53,48 @@ impl LocalRuntime {
         object_root: &str,
         lancedb_uri: Option<&str>,
     ) -> Result<Self> {
+        Self::open_with_options(
+            postgres_url,
+            max_connections,
+            object_root,
+            lancedb_uri,
+            true,
+            8 * 1024 * 1024 * 1024,
+        )
+        .await
+    }
+
+    pub async fn open_with_options(
+        postgres_url: &str,
+        max_connections: u32,
+        object_root: &str,
+        lancedb_uri: Option<&str>,
+        memory_capability: bool,
+        max_upload_bytes: u64,
+    ) -> Result<Self> {
+        if max_upload_bytes == 0 {
+            return Err(nous_core::Error::Invalid(
+                "max_upload_bytes must be positive".into(),
+            ));
+        }
         let store = MemoryStore::connect(postgres_url, max_connections).await?;
         store.migrate().await?;
         let objects = ObjectStore::open(object_root).await?;
         objects.check().await?;
-        let (projection, projection_failure) = match lancedb_uri {
-            Some(uri) => match RetrievalProjection::open(uri).await {
+        let (projection, projection_failure) = match (memory_capability, lancedb_uri) {
+            (false, _) => (None, false),
+            (true, Some(uri)) => match RetrievalProjection::open(uri).await {
                 Ok(projection) => (Some(projection), false),
                 Err(_) => (None, true),
             },
-            None => (None, false),
+            (true, None) => (None, false),
         };
         Ok(Self {
             store,
             objects,
             projection,
+            memory_capability,
+            max_upload_bytes,
             projection_failure,
             models: std::sync::Arc::new(models::ModelServices::new(None, None, None)?),
             process_id: uuid::Uuid::now_v7(),
@@ -99,7 +130,15 @@ impl LocalRuntime {
                 status("postgres", postgres),
                 status("object_store", objects),
                 projection,
-                model_status("model.embedding", self.models.embedding.as_ref()),
+                if self.models.local_embedding.is_some() {
+                    CapabilityStatus {
+                        capability_id: "model.embedding".into(),
+                        status: Readiness::Ready,
+                        reason: Some("bundled FastEmbed local model loaded".into()),
+                    }
+                } else {
+                    model_status("model.embedding", self.models.embedding.as_ref())
+                },
                 model_status("model.rerank", self.models.rerank.as_ref()),
                 model_status("model.generation", self.models.generation.as_ref()),
             ],
@@ -115,7 +154,9 @@ impl LocalRuntime {
                 },
                 CapabilityStatus {
                     capability_id: "memory".into(),
-                    status: if postgres && objects {
+                    status: if !self.memory_capability {
+                        Readiness::Unavailable
+                    } else if postgres && objects {
                         if self.projection.is_some() {
                             Readiness::Ready
                         } else {
@@ -124,7 +165,20 @@ impl LocalRuntime {
                     } else {
                         Readiness::Unavailable
                     },
-                    reason: None,
+                    reason: if !self.memory_capability {
+                        Some("Memory MicroSystem is disabled by the runtime profile".into())
+                    } else if self.projection.is_none() {
+                        Some(
+                            if self.projection_failure {
+                                "memory projection failed to open"
+                            } else {
+                                "dense projection is unavailable"
+                            }
+                            .into(),
+                        )
+                    } else {
+                        None
+                    },
                 },
             ],
         }

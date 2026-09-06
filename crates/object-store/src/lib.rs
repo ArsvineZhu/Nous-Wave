@@ -1,5 +1,7 @@
+use futures::{Stream, StreamExt};
 use nous_core::{Error, Result};
 use opendal::{Operator, services::Fs};
+use tokio::io::AsyncWriteExt;
 
 #[derive(Clone)]
 pub struct ObjectStore {
@@ -85,6 +87,73 @@ impl ObjectStore {
             .await
             .map_err(storage_error)?;
         Ok(hash)
+    }
+
+    /// Stream an object into a staging file, hashing and enforcing the bound
+    /// while bytes arrive. The final rename is the only point at which the
+    /// canonical content-addressed path becomes visible.
+    pub async fn put_chunks<S>(&self, chunks: S, max_bytes: u64) -> Result<(String, u64)>
+    where
+        S: Stream<Item = Result<Vec<u8>>>,
+    {
+        if max_bytes == 0 {
+            return Err(Error::Invalid("upload byte limit must be positive".into()));
+        }
+        let staging = self.root.join(format!(".staging-{}", uuid::Uuid::now_v7()));
+        let mut file = tokio::fs::File::create(&staging)
+            .await
+            .map_err(|e| Error::Infrastructure(e.to_string()))?;
+        let mut hasher = blake3::Hasher::new();
+        let mut size = 0_u64;
+        futures::pin_mut!(chunks);
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk?;
+            let chunk_len = u64::try_from(chunk.len())
+                .map_err(|_| Error::Invalid("upload chunk is too large".into()))?;
+            size = size
+                .checked_add(chunk_len)
+                .ok_or_else(|| Error::Invalid("upload is too large".into()))?;
+            if size > max_bytes {
+                let _ = tokio::fs::remove_file(&staging).await;
+                return Err(Error::Invalid(
+                    "upload exceeds configured byte limit".into(),
+                ));
+            }
+            hasher.update(&chunk);
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| Error::Infrastructure(e.to_string()))?;
+        }
+        file.flush()
+            .await
+            .map_err(|e| Error::Infrastructure(e.to_string()))?;
+        drop(file);
+
+        let hash = hasher.finalize().to_hex().to_string();
+        let key = Self::key(&hash)?;
+        let target = self.root.join(&key);
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| Error::Infrastructure(e.to_string()))?;
+        }
+        match tokio::fs::metadata(&target).await {
+            Ok(_) => {
+                tokio::fs::remove_file(&staging)
+                    .await
+                    .map_err(|e| Error::Infrastructure(e.to_string()))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tokio::fs::rename(&staging, &target)
+                    .await
+                    .map_err(|e| Error::Infrastructure(e.to_string()))?;
+            }
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&staging).await;
+                return Err(Error::Infrastructure(error.to_string()));
+            }
+        }
+        Ok((hash, size))
     }
 
     pub async fn get(&self, hash: &str) -> Result<Vec<u8>> {

@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use nous_core::{Error, Result};
 use nous_memory_service::{LocalRuntime, RuntimeStatus};
+use postgresql_embedded::{PostgreSQL, SettingsBuilder, VersionReq};
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -267,8 +268,23 @@ struct MicroSystems {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Postgres {
+    #[serde(default = "default_postgres_mode")]
+    mode: String,
+    #[serde(default)]
     url: String,
     max_connections: u32,
+    #[serde(default = "default_database_name")]
+    database: String,
+    #[serde(default)]
+    install_dir: String,
+    #[serde(default)]
+    data_dir: String,
+}
+fn default_postgres_mode() -> String {
+    "managed".into()
+}
+fn default_database_name() -> String {
+    "nous_wave".into()
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -329,6 +345,8 @@ struct Model {
     model: String,
     #[serde(default = "default_model_revision")]
     revision: String,
+    #[serde(default)]
+    dimension: usize,
     #[serde(default = "default_preprocessing")]
     preprocessing: String,
     #[serde(default = "default_model_timeout")]
@@ -346,6 +364,7 @@ impl Default for Model {
             endpoint: String::new(),
             model: String::new(),
             revision: default_model_revision(),
+            dimension: 0,
             preprocessing: default_preprocessing(),
             timeout_seconds: default_model_timeout(),
             max_response_bytes: default_model_response(),
@@ -393,11 +412,17 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    let app_root = std::env::current_exe()
+        .map_err(|e| Error::Infrastructure(e.to_string()))?
+        .parent()
+        .ok_or_else(|| Error::Infrastructure("executable has no parent directory".into()))?
+        .to_path_buf();
     let text = tokio::fs::read_to_string(cli.config)
         .await
         .map_err(|e| Error::Invalid(e.to_string()))?;
     let mut config: Config = toml::from_str(&text).map_err(|e| Error::Invalid(e.to_string()))?;
     if let Ok(url) = std::env::var("NOUS_WAVE_POSTGRES_URL") {
+        config.postgres.mode = "external".into();
         config.postgres.url = url;
     }
     if config.server.remote_access || !config.server.bind.ip().is_loopback() {
@@ -425,34 +450,173 @@ async fn run() -> Result<()> {
             "embedding mode must be local or http".into(),
         ));
     }
-    let mut runtime = LocalRuntime::open_with_options(
-        &config.postgres.url,
+    let (postgres_url, managed_postgres) = match config.postgres.mode.as_str() {
+        "external" => {
+            if config.postgres.url.trim().is_empty() {
+                return Err(Error::Invalid(
+                    "external postgres mode requires postgres.url".into(),
+                ));
+            }
+            (config.postgres.url.clone(), None)
+        }
+        "managed" => {
+            let install_dir = resolve_path(
+                &app_root,
+                &config.postgres.install_dir,
+                "data/postgres-install",
+            );
+            let data_dir = resolve_path(&app_root, &config.postgres.data_dir, "data/postgres");
+            tokio::fs::create_dir_all(&install_dir).await.map_err(|e| {
+                Error::Infrastructure(format!("managed PostgreSQL install directory: {e}"))
+            })?;
+            if let Some(parent) = data_dir.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    Error::Infrastructure(format!("managed PostgreSQL data parent: {e}"))
+                })?;
+            }
+            if data_dir.is_dir() && !data_dir.join("PG_VERSION").is_file() {
+                let stale_password = data_dir.join(".pgpass");
+                if stale_password.is_file() {
+                    tokio::fs::remove_file(&stale_password).await.map_err(|e| {
+                        Error::Infrastructure(format!(
+                            "managed PostgreSQL stale password file: {e}"
+                        ))
+                    })?;
+                }
+                let mut entries = tokio::fs::read_dir(&data_dir).await.map_err(|e| {
+                    Error::Infrastructure(format!("managed PostgreSQL data directory: {e}"))
+                })?;
+                if entries
+                    .next_entry()
+                    .await
+                    .map_err(|e| Error::Infrastructure(e.to_string()))?
+                    .is_some()
+                {
+                    return Err(Error::Conflict("managed PostgreSQL data directory is nonempty but is not a PostgreSQL cluster".into()));
+                }
+            }
+            let password_file = data_dir
+                .parent()
+                .unwrap_or(&data_dir)
+                .join("postgres.pgpass");
+            let settings = SettingsBuilder::new()
+                .version(VersionReq::parse("=18.6.0").map_err(|e| Error::Invalid(e.to_string()))?)
+                .host("127.0.0.1")
+                .port(0)
+                .username("postgres")
+                .password("nous_wave")
+                .installation_dir(install_dir)
+                .data_dir(data_dir)
+                .password_file(password_file)
+                .temporary(false)
+                .build();
+            let mut postgres = PostgreSQL::new(settings);
+            let prior_locale = std::env::var("LC_ALL").ok();
+            let prior_lang = std::env::var("LANG").ok();
+            // PostgreSQL Embedded invokes initdb as a child process. The host
+            // locale may lack a matching text-search configuration, while C is
+            // available on every supported Windows installation.
+            unsafe {
+                std::env::set_var("LC_ALL", "C");
+                std::env::set_var("LANG", "C");
+            }
+            let setup_result = postgres.setup().await;
+            unsafe {
+                match prior_locale {
+                    Some(value) => std::env::set_var("LC_ALL", value),
+                    None => std::env::remove_var("LC_ALL"),
+                }
+                match prior_lang {
+                    Some(value) => std::env::set_var("LANG", value),
+                    None => std::env::remove_var("LANG"),
+                }
+            }
+            setup_result.map_err(|e| {
+                Error::Infrastructure(format!("managed PostgreSQL setup failed: {e}"))
+            })?;
+            postgres.start().await.map_err(|e| {
+                Error::Infrastructure(format!("managed PostgreSQL start failed: {e}"))
+            })?;
+            let database = if config.postgres.database.trim().is_empty() {
+                "nous_wave"
+            } else {
+                config.postgres.database.as_str()
+            };
+            if !postgres
+                .database_exists(database)
+                .await
+                .map_err(|e| Error::Infrastructure(e.to_string()))?
+            {
+                postgres
+                    .create_database(database)
+                    .await
+                    .map_err(|e| Error::Infrastructure(e.to_string()))?;
+            }
+            (postgres.settings().url(database), Some(postgres))
+        }
+        _ => {
+            return Err(Error::Invalid(
+                "postgres.mode must be managed or external".into(),
+            ));
+        }
+    };
+    let object_root = resolve_path(&app_root, &config.object_store.root, "data/objects");
+    let lance_root = resolve_path(&app_root, &config.retrieval.lancedb_uri, "data/lancedb");
+    let runtime_result = LocalRuntime::open_with_options(
+        &postgres_url,
         config.postgres.max_connections,
-        &config.object_store.root,
+        object_root.to_string_lossy().as_ref(),
         config
             .microsystems
             .memory
-            .then_some(config.retrieval.lancedb_uri.as_str()),
+            .then_some(lance_root.to_string_lossy().as_ref()),
         config.microsystems.memory,
         config.object_store.max_upload_bytes,
     )
-    .await?
-    .with_models({
+    .await;
+    let mut runtime = match runtime_result {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            if let Some(postgres) = managed_postgres.as_ref() {
+                let _ = postgres.stop().await;
+            }
+            return Err(error);
+        }
+    };
+    let mut model_failure = None;
+    let models = {
         let mut embedding = config.models.embedding;
+        if embedding.enabled
+            && embedding.mode == "local"
+            && embedding.model == "BAAI/bge-m3"
+            && embedding.dimension != 1024
+        {
+            return Err(Error::Invalid(
+                "configured BAAI/bge-m3 dimension must be 1024".into(),
+            ));
+        }
         let local = if embedding.enabled && embedding.mode == "local" {
             let cache_dir = if embedding.cache_dir.is_empty() {
-                PathBuf::from("models")
+                app_root.join("models")
             } else {
-                PathBuf::from(&embedding.cache_dir)
+                resolve_path(&app_root, &embedding.cache_dir, "models")
             };
-            Some(
-                nous_memory_service::models::LocalEmbeddingModel::load(cache_dir, &embedding.model)
-                    .await?,
+            match nous_memory_service::models::LocalEmbeddingModel::load(
+                cache_dir,
+                &embedding.model,
             )
+            .await
+            {
+                Ok(model) => Some(model),
+                Err(error) => {
+                    model_failure = Some(error.to_string());
+                    None
+                }
+            }
         } else {
             None
         };
-        if local.is_some() {
+        if embedding.mode == "local" {
             embedding.enabled = false;
         }
         let services = nous_memory_service::models::ModelServices::new(
@@ -463,11 +627,15 @@ async fn run() -> Result<()> {
         local.map_or(services.clone(), |model| {
             services.with_local_embedding(model)
         })
-    });
+    };
+    runtime = runtime
+        .with_models(models)
+        .with_model_failure(model_failure);
     runtime.default_effort = config.retrieval.default_effort;
     runtime.recall_budgets = config.retrieval.budgets;
     runtime.association_config = config.association;
     runtime.use_decay = config.accessibility.use_decay;
+    let command_result: Result<()> = async {
     match cli.command {
         Command::Material { command } => {
             let output = match command {
@@ -594,8 +762,30 @@ async fn run() -> Result<()> {
                 .map_err(|e| Error::Infrastructure(e.to_string()))?;
         }
     }
-    runtime.store.close().await;
     Ok(())
+    }.await;
+    runtime.store.close().await;
+    if let Some(postgres) = managed_postgres.as_ref() {
+        postgres
+            .stop()
+            .await
+            .map_err(|e| Error::Infrastructure(e.to_string()))?;
+    }
+    command_result
+}
+
+fn resolve_path(root: &std::path::Path, configured: &str, fallback: &str) -> PathBuf {
+    let configured = if configured.trim().is_empty() {
+        fallback
+    } else {
+        configured
+    };
+    let path = PathBuf::from(configured);
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
 }
 
 fn model_endpoint(model: Model) -> nous_memory_service::models::ModelEndpoint {

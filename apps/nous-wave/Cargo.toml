@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+portable-release = []
+
 [dependencies]
 nous-core.workspace = true
 nous-memory-service.workspace = true
@@ -21,6 +24,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 futures.workspace = true
+postgresql_embedded.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

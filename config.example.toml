@@ -6,9 +6,12 @@ remote_access = false
 memory = true
 
 [postgres]
-# Override credentials with NOUS_WAVE_POSTGRES_URL.
-url = "postgresql://localhost:5432/nous_wave"
+mode = "managed"
+url = ""
 max_connections = 8
+database = "nous_wave"
+install_dir = "./data/postgres-install"
+data_dir = "./data/postgres"
 
 [object_store]
 backend = "fs"
@@ -35,9 +38,12 @@ use_decay = 0.5
 
 # Local model choice is provisional until the required fixed bake-off passes.
 [models.embedding]
-enabled = false
+enabled = true
 mode = "local"
 model = "BAAI/bge-m3"
+revision = "5617a9f61b028005a4858fdac845db406aefb181"
+preprocessing = "identity-l2-v1"
+dimension = 1024
 cache_dir = "./models"
 
 [models.rerank]

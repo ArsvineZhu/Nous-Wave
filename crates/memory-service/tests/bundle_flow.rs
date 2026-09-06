@@ -2,10 +2,13 @@ use nous_material::{Classification, EpistemicClass, OriginClass};
 use nous_memory_domain::recall::{
     RecallCues, RecallEffort, RecallIntent, RecallObjective, ResultNeed,
 };
+use nous_memory_domain::{RevisionRelation, learning::UseKind};
 use nous_memory_service::{
     LocalRuntime,
     bundle::ImportRequest,
+    cycles::UseFeedback,
     material::{IngestMaterial, MaterialContent},
+    memory::CorrectMemory,
     subjects::{CreateSubject, SeedContent, SeedInput},
 };
 use uuid::Uuid;
@@ -58,7 +61,7 @@ async fn bundle_round_trip_verifies_hashes_and_new_identity() {
                 invocation_id: None,
                 idempotency_key: Some("bundle-source".into()),
                 parent_sources: vec![],
-                metadata: serde_json::json!({}),
+                metadata: serde_json::json!({"episode_key":"bundle-episode"}),
                 content: MaterialContent::Text {
                     text: "A portable bundle fact.".into(),
                 },
@@ -66,7 +69,92 @@ async fn bundle_round_trip_verifies_hashes_and_new_identity() {
         )
         .await
         .unwrap();
+    runtime
+        .ingest(
+            subject.subject_id,
+            IngestMaterial {
+                api_version: 1,
+                source_kind: "test:bundle".into(),
+                classification: Classification {
+                    origin: OriginClass::Human,
+                    semantic: "DOCUMENT".into(),
+                    epistemic: EpistemicClass::Observed,
+                },
+                media_type: "text/plain".into(),
+                scope: "bundle".into(),
+                occurred: None,
+                observed_at: None,
+                actor: None,
+                invocation_id: None,
+                idempotency_key: Some("bundle-source-2".into()),
+                parent_sources: vec![],
+                metadata: serde_json::json!({"episode_key":"bundle-episode"}),
+                content: MaterialContent::Text {
+                    text: "A second episode fact.".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
     runtime.process_pending(10).await.unwrap();
+    let object: Uuid = sqlx::query_scalar(
+        "SELECT o.object_id FROM memory_objects o JOIN memory_current_heads h USING(object_id) JOIN memory_revisions r USING(revision_id) WHERE o.subject_id=$1 AND o.object_kind='REFERENCE' AND r.representation_text LIKE '%portable bundle fact%' LIMIT 1",
+    )
+    .bind(subject.subject_id.0)
+    .fetch_one(runtime.store.pool())
+    .await
+    .unwrap();
+    let cycle = runtime
+        .begin_cycle(
+            subject.subject_id,
+            serde_json::json!({"reason":"bundle evidence"}),
+        )
+        .await
+        .unwrap();
+    runtime
+        .feedback(
+            subject.subject_id,
+            cycle,
+            UseFeedback {
+                api_version: 1,
+                event_id: Uuid::now_v7(),
+                kind: UseKind::ReferencedOrActedOn,
+                object_refs: vec![object],
+                followed_from: None,
+                causation_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .close_cycle(subject.subject_id, cycle, "resolved")
+        .await
+        .unwrap();
+    let old = runtime
+        .memory(subject.subject_id, object, None)
+        .await
+        .unwrap();
+    let mut replacement = old.content.clone();
+    replacement.text.push_str(" corrected");
+    runtime
+        .correct_memory(
+            subject.subject_id,
+            object,
+            CorrectMemory {
+                api_version: 1,
+                expected_revision: old.revision_id,
+                replacement,
+                reason: "bundle correction".into(),
+                authority_metadata: None,
+                relation: RevisionRelation::Correction,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .suppress(subject.subject_id, object, true, "portable suppression")
+        .await
+        .unwrap();
     let bundle_path = root.path().join("bundle");
     let manifest = runtime
         .export_bundle(subject.subject_id, &bundle_path)
@@ -74,6 +162,16 @@ async fn bundle_round_trip_verifies_hashes_and_new_identity() {
         .unwrap();
     assert_eq!(manifest.schema_version, 2);
     assert!(!manifest.object_hashes.is_empty());
+    assert!(
+        tokio::fs::try_exists(bundle_path.join("use-events.json"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        tokio::fs::try_exists(bundle_path.join("associations.json"))
+            .await
+            .unwrap()
+    );
     let imported = runtime
         .import_bundle(
             &bundle_path,
@@ -95,6 +193,49 @@ async fn bundle_round_trip_verifies_hashes_and_new_identity() {
             .len(),
         1
     );
+    let imported_reference: Uuid = sqlx::query_scalar(
+        "SELECT o.object_id FROM memory_objects o JOIN memory_current_heads h USING(object_id) JOIN memory_revisions r USING(revision_id) WHERE o.subject_id=$1 AND o.object_kind='REFERENCE' AND r.representation_text LIKE '%portable bundle fact%' LIMIT 1",
+    )
+    .bind(imported.subject_id.0)
+    .fetch_one(runtime.store.pool())
+    .await
+    .unwrap();
+    let imported_view = runtime
+        .memory(imported.subject_id, imported_reference, None)
+        .await
+        .unwrap();
+    assert!(imported_view.suppressed);
+    assert_eq!(
+        runtime
+            .memory_history(imported.subject_id, imported_reference)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let imported_episode: Uuid = sqlx::query_scalar(
+        "SELECT object_id FROM memory_objects WHERE subject_id=$1 AND object_kind='EPISODE' LIMIT 1",
+    )
+    .bind(imported.subject_id.0)
+    .fetch_one(runtime.store.pool())
+    .await
+    .unwrap();
+    let membership = runtime
+        .episode_membership(imported.subject_id, imported_episode)
+        .await
+        .unwrap();
+    assert!(
+        membership["members"]
+            .as_array()
+            .is_some_and(|members| !members.is_empty())
+    );
+    let associations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM association_evidence WHERE subject_id=$1")
+            .bind(imported.subject_id.0)
+            .fetch_one(runtime.store.pool())
+            .await
+            .unwrap();
+    assert!(associations > 0);
     let recalled = runtime
         .recall(
             imported.subject_id,
@@ -118,7 +259,10 @@ async fn bundle_round_trip_verifies_hashes_and_new_identity() {
         )
         .await
         .unwrap();
-    assert_eq!(recalled.results.len(), 1);
+    assert!(
+        recalled.results.is_empty(),
+        "suppression survives import and removes ordinary recall"
+    );
     let bytes = tokio::fs::read(bundle_path.join("objects").join(&manifest.object_hashes[0]))
         .await
         .unwrap();

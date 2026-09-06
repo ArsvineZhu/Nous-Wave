@@ -31,6 +31,7 @@ pub struct LocalRuntime {
     pub use_decay: f64,
     projection_failure: bool,
     pub models: std::sync::Arc<models::ModelServices>,
+    pub model_failure: Option<String>,
     pub(crate) process_id: uuid::Uuid,
     pub(crate) cycles: std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<uuid::Uuid, cycles::WorkingState>>,
@@ -47,6 +48,10 @@ pub struct RuntimeStatus {
 impl LocalRuntime {
     pub fn with_models(mut self, models: models::ModelServices) -> Self {
         self.models = std::sync::Arc::new(models);
+        self
+    }
+    pub fn with_model_failure(mut self, failure: Option<String>) -> Self {
+        self.model_failure = failure;
         self
     }
     pub(crate) fn projection_failed(&self) -> bool {
@@ -106,6 +111,7 @@ impl LocalRuntime {
             use_decay: 0.5,
             projection_failure,
             models: std::sync::Arc::new(models::ModelServices::new(None, None, None)?),
+            model_failure: None,
             process_id: uuid::Uuid::now_v7(),
             cycles: Default::default(),
         })
@@ -144,6 +150,12 @@ impl LocalRuntime {
                         capability_id: "model.embedding".into(),
                         status: Readiness::Ready,
                         reason: Some("FastEmbed local model loaded".into()),
+                    }
+                } else if let Some(reason) = &self.model_failure {
+                    CapabilityStatus {
+                        capability_id: "model.embedding".into(),
+                        status: Readiness::Failed,
+                        reason: Some(reason.clone()),
                     }
                 } else {
                     model_status("model.embedding", self.models.embedding.as_ref())
@@ -185,6 +197,8 @@ impl LocalRuntime {
                             }
                             .into(),
                         )
+                    } else if let Some(reason) = &self.model_failure {
+                        Some(format!("embedding failed: {reason}"))
                     } else if !self.models.embedding_available() {
                         Some(
                             "embedding is not configured; dense and residual retrieval unavailable"

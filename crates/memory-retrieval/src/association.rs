@@ -277,9 +277,6 @@ impl ActivationState {
         let mut scores = BTreeMap::new();
         let divisor = self.seeds.len().max(1) as f64;
         for support in self.best.values() {
-            if support.path.is_empty() {
-                continue;
-            }
             *scores.entry(support.target).or_insert(0.0) += support.activation / divisor;
         }
         scores

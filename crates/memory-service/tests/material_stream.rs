@@ -3,7 +3,7 @@ use nous_core::{Error, Readiness};
 use nous_material::{Classification, EpistemicClass, OriginClass};
 use nous_memory_service::{
     LocalRuntime,
-    material::UploadMetadata,
+    material::{IngestMaterial, MaterialContent, UploadMetadata},
     subjects::{CreateSubject, SeedContent, SeedInput},
 };
 use uuid::Uuid;
@@ -182,4 +182,73 @@ async fn bounded_upload_roundtrip_and_absent_memory() {
             .unwrap();
     assert_eq!(artifact_count, 2, "only seed and successful upload exist");
     runtime.store.close().await;
+
+    // Subject-level disablement is independent from the global capability.
+    let disabled_runtime = LocalRuntime::open_with_options(
+        &url,
+        4,
+        root.path().join("disabled-objects").to_str().unwrap(),
+        None,
+        true,
+        8 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+    let disabled = disabled_runtime
+        .create_subject(CreateSubject {
+            api_version: 1,
+            label: None,
+            metadata: serde_json::json!({}),
+            memory_enabled: false,
+            character_seed: SeedInput {
+                content: SeedContent::Inline {
+                    content: "material remains usable".into(),
+                    media_type: "text/plain".into(),
+                },
+                authored_by: "host:test".into(),
+            },
+        })
+        .await
+        .unwrap()
+        .subject_id;
+    let accepted = disabled_runtime
+        .ingest(
+            disabled,
+            IngestMaterial {
+                api_version: 1,
+                source_kind: "host:note".into(),
+                classification: Classification {
+                    origin: OriginClass::Host,
+                    semantic: "NOTE".into(),
+                    epistemic: EpistemicClass::Observed,
+                },
+                media_type: "text/plain".into(),
+                scope: "disabled".into(),
+                occurred: None,
+                observed_at: None,
+                actor: None,
+                invocation_id: None,
+                idempotency_key: Some("disabled-note".into()),
+                parent_sources: vec![],
+                metadata: serde_json::json!({}),
+                content: MaterialContent::Text {
+                    text: "stored while memory is disabled".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        disabled_runtime
+            .artifact(disabled, accepted.artifact_id)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        disabled_runtime
+            .memory(disabled, Uuid::now_v7(), None)
+            .await,
+        Err(Error::Unavailable(_))
+    ));
+    disabled_runtime.store.close().await;
 }

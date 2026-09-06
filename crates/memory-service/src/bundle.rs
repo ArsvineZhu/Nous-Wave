@@ -521,6 +521,16 @@ impl LocalRuntime {
             self.insert_memory(&mut tx, imported_subject, bundle_memory)
                 .await?;
         }
+        for bundle_memory in &memories {
+            for episode in &bundle_memory.episode_ids {
+                sqlx::query("INSERT INTO episode_members(subject_id,episode_id,member_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+                    .bind(imported_subject.0).bind(episode).bind(bundle_memory.object_id).execute(&mut *tx).await.map_err(db)?;
+            }
+            for member in &bundle_memory.member_ids {
+                sqlx::query("INSERT INTO episode_members(subject_id,episode_id,member_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+                    .bind(imported_subject.0).bind(bundle_memory.object_id).bind(member).execute(&mut *tx).await.map_err(db)?;
+            }
+        }
         for event in &use_events {
             sqlx::query("INSERT INTO cognitive_use_events(event_id,subject_id,cycle_id,kind,object_refs,occurred_at,causation_id) VALUES($1,$2,NULL,$3,$4,$5,$6)")
                 .bind(event.event_id).bind(imported_subject.0).bind(&event.kind).bind(&event.object_refs).bind(event.occurred_at).bind(event.causation_id).execute(&mut *tx).await.map_err(db)?;
@@ -627,14 +637,6 @@ impl LocalRuntime {
             .execute(&mut **tx)
             .await
             .map_err(db)?;
-        for episode in &bundle.episode_ids {
-            sqlx::query("INSERT INTO episode_members(subject_id,episode_id,member_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
-                .bind(subject.0).bind(episode).bind(bundle.object_id).execute(&mut **tx).await.map_err(db)?;
-        }
-        for member in &bundle.member_ids {
-            sqlx::query("INSERT INTO episode_members(subject_id,episode_id,member_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
-                .bind(subject.0).bind(bundle.object_id).bind(member).execute(&mut **tx).await.map_err(db)?;
-        }
         Ok(())
     }
 

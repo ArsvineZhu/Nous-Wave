@@ -26,6 +26,13 @@ impl LocalEmbeddingModel {
         };
         let identity = identity.to_owned();
         tokio::task::spawn_blocking(move || {
+            let model_dir = cache_dir.join(format!("models--{}", identity.replace('/', "--")));
+            if !model_dir.is_dir() {
+                return Err(Error::Unavailable(format!(
+                    "bundled local model assets are missing at {}",
+                    model_dir.display()
+                )));
+            }
             let options = fastembed::TextInitOptions::new(selected.clone())
                 .with_cache_dir(cache_dir.clone())
                 .with_show_download_progress(false)

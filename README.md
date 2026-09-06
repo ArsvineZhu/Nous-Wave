@@ -18,9 +18,13 @@ Memory capability leaves Subject Core and material storage usable. Enabled Memor
 with unavailable embedding or dense projection reports degradation.
 
 Local FastEmbed and external HTTP embedding paths are implemented. The fixed
-multilingual model bake-off and retrieval ablations are still pending; the current
-local model choice is provisional. External generation/rerank services have not
-been deployed, so their live-provider effectiveness remains `NOT_RUN`.
+multilingual bake-off selected `BAAI/bge-m3` from FastEmbed 6.0.2: its private
+bilingual fixture scored Recall@10/MRR/nDCG@10 of 1.00/1.00/1.00. The base model
+passed correctness but scored MRR 0.943, outside the required three-point MRR band;
+the small model missed one cross-language target (Recall@10 0.929). The selected
+asset revision is `5617a9f61b028005a4858fdac845db406aefb181` with
+`identity-l2-v1` preprocessing. External generation/rerank services have not been
+deployed, so their live-provider effectiveness remains `NOT_RUN`.
 
 ## Development
 
@@ -29,10 +33,12 @@ Use Rust 1.98.1, native build tools (MSVC on Windows), and `protoc` on PATH or i
 PostgreSQL Embedded 0.21.0 and exercise real CAS/LanceDB mechanics. Set
 `POSTGRESQL_VERSION=18.6.0` for the pinned bundled database build.
 
-Copy [config.example.toml](config.example.toml) to ignored `config.toml`, configure
-an external PostgreSQL 18 database, and run `cargo run -p nous-wave -- status` or
-`cargo run -p nous-wave -- serve`. `NOUS_WAVE_POSTGRES_URL` overrides the configured
-connection string. Current service binding is loopback only.
+Copy [config.example.toml](config.example.toml) to ignored `config.toml` and run
+`cargo run -p nous-wave -- status` or `cargo run -p nous-wave -- serve`. The example
+uses the managed PostgreSQL 18.6 profile and keeps its database beneath the executable
+directory. Developer deployments may set `postgres.mode = "external"` and provide a
+PostgreSQL URL; `NOUS_WAVE_POSTGRES_URL` selects that external mode. Current service
+binding is loopback only.
 
 CLI operations are discoverable with `--help`. File I/O examples:
 
@@ -46,8 +52,12 @@ nous-wave artifact lineage SUBJECT ARTIFACT
 ```
 
 Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`
-and `cargo test --workspace` at integration boundaries. Passing these commands does
-not establish the unrun algorithm bake-off or portable-release claims.
+and `cargo test --workspace` at integration boundaries. The fixed algorithm
+ablation is `cargo run -p nous-memory-retrieval --example ablation`; its current
+evidence is written to `.local/evaluation/ablation-v1.json`. A source-less package
+is assembled with `scripts/package-portable.ps1` after the product checks; clean
+machine and relocation qualification remain `NOT_RUN` until the extracted package
+has been exercised separately.
 
 ## Research attribution
 

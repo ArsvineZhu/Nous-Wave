@@ -1,0 +1,18 @@
+[package]
+name = "nous-memory-retrieval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nous-core.workspace = true
+nous-memory-domain.workspace = true
+lancedb.workspace = true
+serde.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+futures.workspace = true
+blake3.workspace = true

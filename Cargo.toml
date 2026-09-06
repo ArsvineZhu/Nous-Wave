@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/nous-wave"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs", "sync", "time", "net"] }
+axum = "=0.8.9"
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
+# 0.38.0 job.rs references Error::Http unconditionally; its declaration is gated
+# by remote. Enable the feature to compile this release; runtime stays embedded.
+lancedb = { version = "=0.38.0", features = ["remote"] }
+opendal = { version = "=0.58.2", default-features = false, features = ["services-fs", "executors-tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+blake3 = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+toml = "0.9"
+tempfile = "3"
+arrow-array = "58"
+arrow-schema = "58"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+nous-core = { path = "crates/core" }
+nous-material = { path = "crates/material" }
+nous-object-store = { path = "crates/object-store" }
+nous-memory-domain = { path = "crates/memory-domain" }
+nous-memory-store = { path = "crates/memory-store" }
+nous-memory-retrieval = { path = "crates/memory-retrieval" }
+nous-memory-service = { path = "crates/memory-service" }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

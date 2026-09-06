@@ -1,0 +1,13 @@
+[package]
+name = "nous-object-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nous-core.workspace = true
+opendal.workspace = true
+blake3.workspace = true
+tokio.workspace = true
+futures.workspace = true

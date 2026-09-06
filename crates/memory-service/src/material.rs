@@ -16,9 +16,16 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MaterialContent {
-    Text { text: String },
-    Json { value: serde_json::Value },
-    Artifact { artifact_id: Uuid },
+    Text {
+        text: String,
+    },
+    Json {
+        value: serde_json::Value,
+    },
+    #[serde(rename = "existing_artifact")]
+    Artifact {
+        artifact_id: Uuid,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -535,6 +542,16 @@ impl LocalRuntime {
             "source_ids": sources,
             "derivations": inputs.into_iter().map(|(derivation_id, input_artifacts)| serde_json::json!({"derivation_id": derivation_id, "input_artifacts": input_artifacts})).collect::<Vec<_>>(),
         }))
+    }
+
+    pub async fn artifact_stream(
+        &self,
+        subject: SubjectId,
+        artifact: Uuid,
+    ) -> Result<(Artifact, impl Stream<Item = Result<Vec<u8>>> + Send + use<>)> {
+        let metadata = self.artifact(subject, artifact).await?;
+        let stream = self.objects.stream(&metadata.content_hash).await?;
+        Ok((metadata, stream))
     }
 
     pub async fn artifact_bytes(&self, subject: SubjectId, artifact: Uuid) -> Result<Vec<u8>> {

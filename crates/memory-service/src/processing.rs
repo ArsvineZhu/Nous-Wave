@@ -39,6 +39,7 @@ impl LocalRuntime {
         subject: SubjectId,
         limit: usize,
     ) -> Result<ProcessingResult> {
+        self.require_memory(subject).await?;
         self.process_pending_inner(Some(subject), limit).await
     }
 
@@ -223,8 +224,15 @@ impl LocalRuntime {
             derivation_refs: vec![],
             entities: vec![],
         };
-        let (reference, _) =
-            form_memory(&mut tx, claim.subject, &draft, &format!("source:{source}")).await?;
+        let (reference, _) = form_memory(
+            &mut tx,
+            claim.subject,
+            &draft,
+            &format!("source:{source}"),
+            "SOURCE_REFERENCE",
+            serde_json::json!({}),
+        )
+        .await?;
         for (from_kind, from_id, to_kind, to_id) in [
             ("source", source, "memory", reference),
             ("memory", reference, "source", source),
@@ -256,7 +264,15 @@ impl LocalRuntime {
                 ..draft.clone()
             };
             let key = format!("episode:{scope}:{group}");
-            let (episode_id, head) = form_memory(&mut tx, claim.subject, &episode, &key).await?;
+            let (episode_id, head) = form_memory(
+                &mut tx,
+                claim.subject,
+                &episode,
+                &key,
+                "HOST_EPISODE",
+                serde_json::json!({"episode_key": group}),
+            )
+            .await?;
             let current_count: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM memory_revision_sources WHERE revision_id=$1",
             )
@@ -340,6 +356,8 @@ impl LocalRuntime {
                     claim.subject,
                     &inferred,
                     &format!("source:{source}:proposal:{proposal_index}"),
+                    "MODEL_EXTRACT",
+                    serde_json::json!({"proposal_index": proposal_index, "operation": "extract_v1"}),
                 )
                 .await?;
                 for supported_source in &inferred.source_refs {
@@ -395,7 +413,7 @@ impl LocalRuntime {
     async fn process_regeneration(&self, claim: &Claim) -> Result<()> {
         let _objects = self.objects.reference_guard(false).await?;
         let object = payload_uuid(&claim.payload, "object_id")?;
-        let sources: Vec<Uuid> = serde_json::from_value(
+        let mut sources: Vec<Uuid> = serde_json::from_value(
             claim
                 .payload
                 .get("source_refs")
@@ -410,20 +428,60 @@ impl LocalRuntime {
             .payload
             .get("formation_class")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("SOURCE_REFERENCE");
-        if matches!(
-            formation_class,
-            "DUPLICATE_CONSOLIDATION" | "EPISODE_ABSTRACTION"
-        ) && sources.len() < 2
-        {
-            self.delete_unsupported_memory(claim, object).await?;
-            return Ok(());
-        }
+            .ok_or_else(|| Error::Invalid("missing formation class".into()))?;
+        let recipe = claim
+            .payload
+            .get("formation_metadata")
+            .ok_or_else(|| Error::Invalid("missing formation metadata".into()))?;
         let scope = claim
             .payload
             .get("scope")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| Error::Invalid("missing regeneration scope".into()))?;
+        if formation_class == "HOST_EPISODE" {
+            let group = recipe
+                .get("episode_key")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| Error::Invalid("missing episode group".into()))?;
+            sources = sqlx::query_scalar("SELECT source_id FROM source_records WHERE subject_id=$1 AND scope=$2 AND metadata->>'episode_key'=$3 AND source_id=ANY($4) ORDER BY source_id")
+                .bind(claim.subject.0).bind(scope).bind(group).bind(&sources).fetch_all(self.store.pool()).await.map_err(db)?;
+        }
+        if sources.is_empty() {
+            self.delete_unsupported_memory(claim, object).await?;
+            return Ok(());
+        }
+        let mut parents = vec![];
+        if matches!(
+            formation_class,
+            "DUPLICATE_CONSOLIDATION" | "EPISODE_ABSTRACTION"
+        ) {
+            let ids: Vec<Uuid> =
+                serde_json::from_value(recipe.get("parent_objects").cloned().unwrap_or_default())
+                    .map_err(|_| Error::Invalid("missing consolidation parents".into()))?;
+            for id in ids {
+                let state: Option<String> = sqlx::query_scalar(
+                    "SELECT availability FROM memory_objects WHERE subject_id=$1 AND object_id=$2",
+                )
+                .bind(claim.subject.0)
+                .bind(id)
+                .fetch_optional(self.store.pool())
+                .await
+                .map_err(db)?;
+                match state.as_deref() {
+                    Some("regenerating") => {
+                        return Err(Error::Unavailable(
+                            "consolidation parent is regenerating".into(),
+                        ));
+                    }
+                    Some("ready") => parents.push(self.memory(claim.subject, id, None).await?),
+                    _ => {}
+                }
+            }
+            if parents.len() < 2 {
+                self.delete_unsupported_memory(claim, object).await?;
+                return Ok(());
+            }
+        }
         let roots:Vec<Uuid>=sqlx::query_scalar("SELECT DISTINCT a.artifact_id FROM artifact_sources a WHERE a.subject_id=$1 AND a.source_id=ANY($2) AND NOT EXISTS(SELECT 1 FROM derivation_outputs d WHERE d.artifact_id=a.artifact_id)").bind(claim.subject.0).bind(&sources).fetch_all(self.store.pool()).await.map_err(db)?;
         let mut text = String::new();
         let mut material = vec![];
@@ -469,9 +527,7 @@ impl LocalRuntime {
             derivation_refs: vec![],
             entities: vec![],
         };
-        let provenance = if matches!(kind, MemoryKind::Episode | MemoryKind::Reference) {
-            None
-        } else {
+        let provenance = if formation_class == "MODEL_EXTRACT" {
             let (result, provenance) = self.models.extract(&material).await?;
             let Some(proposal) = result
                 .memories
@@ -487,6 +543,66 @@ impl LocalRuntime {
             draft.artifact_refs = proposal.artifact_refs;
             draft.classification.epistemic = EpistemicClass::Inferred;
             Some(provenance)
+        } else {
+            match formation_class {
+                "SOURCE_REFERENCE" => {}
+                "HOST_EPISODE" => {
+                    draft.title = format!(
+                        "Episode: {}",
+                        recipe["episode_key"].as_str().unwrap_or_default()
+                    );
+                    draft.text = format!(
+                        "Host-grouped experience with {} source events",
+                        draft.source_refs.len()
+                    );
+                }
+                "DUPLICATE_CONSOLIDATION" => {
+                    let key = |memory: &crate::memory::MemoryView| {
+                        serde_json::json!([
+                            memory.content.scope,
+                            memory.content.kind,
+                            memory.content.classification,
+                            memory
+                                .content
+                                .text
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ])
+                    };
+                    let first = key(&parents[0]);
+                    parents.retain(|p| key(p) == first);
+                    if parents.len() < 2 {
+                        self.delete_unsupported_memory(claim, object).await?;
+                        return Ok(());
+                    }
+                    draft = crate::operations::merge_support(&parents, parents[0].content.clone());
+                }
+                "EPISODE_ABSTRACTION" => {
+                    parents.retain(|p| {
+                        p.content.kind == MemoryKind::Episode && p.content.scope == scope
+                    });
+                    let retained: Vec<Uuid> = parents
+                        .iter()
+                        .flat_map(|p| p.content.source_refs.iter().copied())
+                        .collect();
+                    let kinds: Vec<String> = sqlx::query_scalar("SELECT source_kind FROM source_records WHERE subject_id=$1 AND source_id=ANY($2) GROUP BY source_kind HAVING count(*)>1 ORDER BY source_kind")
+                        .bind(claim.subject.0).bind(retained).fetch_all(self.store.pool()).await.map_err(db)?;
+                    if parents.len() < 2 || kinds.is_empty() {
+                        self.delete_unsupported_memory(claim, object).await?;
+                        return Ok(());
+                    }
+                    draft = crate::operations::merge_support(&parents, draft);
+                    draft.title = "Recurring episode evidence".into();
+                    draft.text = format!(
+                        "Across {} episodes in this scope, repeated source activity was recorded: {}. This abstraction records recurrence, not agreement or truth of the source claims.",
+                        parents.len(),
+                        kinds.join(", ")
+                    );
+                }
+                _ => return Err(Error::Invalid("unknown formation class".into())),
+            }
+            None
         };
         let mut tx = self.store.pool().begin().await.map_err(db)?;
         lock_subject(&mut tx, claim.subject).await?;
@@ -508,6 +624,31 @@ impl LocalRuntime {
             None,
         )
         .await?;
+        if formation_class == "HOST_EPISODE" {
+            sqlx::query("DELETE FROM episode_members WHERE subject_id=$1 AND episode_id=$2")
+                .bind(claim.subject.0)
+                .bind(object)
+                .execute(&mut *tx)
+                .await
+                .map_err(db)?;
+            sqlx::query("DELETE FROM association_evidence WHERE subject_id=$1 AND evidence_class='episode' AND (from_id=$2 OR to_id=$2)").bind(claim.subject.0).bind(object).execute(&mut *tx).await.map_err(db)?;
+            let members: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT o.object_id FROM memory_objects o JOIN memory_current_heads h USING(object_id) JOIN memory_revision_sources s USING(revision_id) WHERE o.subject_id=$1 AND o.formation_class='SOURCE_REFERENCE' AND s.source_id=ANY($2)")
+                .bind(claim.subject.0).bind(&draft.source_refs).fetch_all(&mut *tx).await.map_err(db)?;
+            for member in members {
+                sqlx::query(
+                    "INSERT INTO episode_members(subject_id,episode_id,member_id) VALUES($1,$2,$3)",
+                )
+                .bind(claim.subject.0)
+                .bind(object)
+                .bind(member)
+                .execute(&mut *tx)
+                .await
+                .map_err(db)?;
+                for (from, to) in [(object, member), (member, object)] {
+                    sqlx::query("INSERT INTO association_evidence(evidence_id,subject_id,from_kind,from_id,to_kind,to_id,evidence_class,support) VALUES($1,$2,'memory',$3,'memory',$4,'episode',1)").bind(Uuid::now_v7()).bind(claim.subject.0).bind(from).bind(to).execute(&mut *tx).await.map_err(db)?;
+                }
+            }
+        }
         sqlx::query(
             "UPDATE memory_objects SET availability='ready' WHERE subject_id=$1 AND object_id=$2",
         )

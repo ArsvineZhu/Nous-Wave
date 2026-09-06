@@ -1,0 +1,47 @@
+[server]
+bind = "127.0.0.1:9470"
+remote_access = false
+
+[microsystems]
+memory = true
+
+[postgres]
+# Override credentials with NOUS_WAVE_POSTGRES_URL.
+url = "postgresql://localhost:5432/nous_wave"
+max_connections = 8
+
+[object_store]
+backend = "fs"
+root = "./data/objects"
+max_upload_bytes = 8589934592
+
+[retrieval]
+lancedb_uri = "./data/lancedb"
+default_effort = "normal"
+
+[retrieval.budgets.normal]
+max_candidates = 64
+max_association_states = 256
+max_association_edges = 1500
+
+[association]
+outbound_mass = 0.95
+backtrack_factor = 0.12
+min_activation = 0.00001
+max_hops = 8
+
+[accessibility]
+use_decay = 0.5
+
+# Local model choice is provisional until the required fixed bake-off passes.
+[models.embedding]
+enabled = false
+mode = "local"
+model = "BAAI/bge-m3"
+cache_dir = "./models"
+
+[models.rerank]
+enabled = false
+
+[models.generation]
+enabled = false

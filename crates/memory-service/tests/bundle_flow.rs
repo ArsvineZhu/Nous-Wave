@@ -72,7 +72,7 @@ async fn bundle_round_trip_verifies_hashes_and_new_identity() {
         .export_bundle(subject.subject_id, &bundle_path)
         .await
         .unwrap();
-    assert_eq!(manifest.schema_version, 1);
+    assert_eq!(manifest.schema_version, 2);
     assert!(!manifest.object_hashes.is_empty());
     let imported = runtime
         .import_bundle(

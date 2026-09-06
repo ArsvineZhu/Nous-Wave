@@ -7,7 +7,7 @@ pub async fn database() -> (PostgreSQL, String, TempDir) {
         .version(VersionReq::parse("=18.6.0").expect("PostgreSQL 18.6 version requirement"))
         .host("127.0.0.1")
         .port(0)
-        .username("nous_wave")
+        .username("postgres")
         .password("nous_wave")
         .installation_dir(root.path().join("installation"))
         .data_dir(root.path().join("postgres"))

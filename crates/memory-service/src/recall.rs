@@ -11,7 +11,7 @@ use nous_memory_domain::{
     learning::{UseKind, accessibility},
     recall::{NodeKind, NodeRef, RecallEffort, RecallEffortTrace, RecallIntent, RecallObjective},
 };
-use nous_memory_retrieval::association::{ActivationConfig, ActivationSupport};
+use nous_memory_retrieval::association::ActivationSupport;
 use nous_memory_retrieval::residual;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -41,12 +41,27 @@ pub struct RecallResponse {
     pub can_continue: bool,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecallBudget {
     pub max_candidates: usize,
     pub max_association_states: usize,
     pub max_association_edges: usize,
 }
 impl RecallBudget {
+    pub fn validate(&self) -> Result<()> {
+        if self.max_candidates == 0
+            || self.max_candidates > 400
+            || self.max_association_states == 0
+            || self.max_association_states > 5000
+            || self.max_association_edges == 0
+            || self.max_association_edges > 40000
+        {
+            return Err(Error::Invalid(
+                "recall budgets exceed bounded product limits".into(),
+            ));
+        }
+        Ok(())
+    }
     fn for_effort(effort: RecallEffort) -> Self {
         let (max_candidates, max_association_states, max_association_edges) = match effort {
             RecallEffort::Light => (24, 64, 256),
@@ -63,6 +78,15 @@ impl RecallBudget {
 }
 
 impl LocalRuntime {
+    pub fn recall_input(&self, mut value: serde_json::Value) -> Result<RecallIntent> {
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| Error::Invalid("recall input must be an object".into()))?;
+        object
+            .entry("effort")
+            .or_insert_with(|| serde_json::json!(self.default_effort));
+        serde_json::from_value(value).map_err(|e| Error::Invalid(e.to_string()))
+    }
     pub async fn recall(&self, subject: SubjectId, intent: RecallIntent) -> Result<RecallResponse> {
         check_version(intent.api_version)?;
         self.require_memory(subject).await?;
@@ -89,7 +113,12 @@ impl LocalRuntime {
             self.check_cycle(subject, cycle).await?;
         }
         let started = Instant::now();
-        let budget = RecallBudget::for_effort(intent.effort);
+        let budget = self
+            .recall_budgets
+            .get(&intent.effort)
+            .copied()
+            .unwrap_or_else(|| RecallBudget::for_effort(intent.effort));
+        budget.validate()?;
         let mut cycles = self.cycles.lock().await;
         let mut standalone = WorkingState::default();
         let state = match intent.cycle_id {
@@ -167,7 +196,7 @@ impl LocalRuntime {
                         && (intent.effort != RecallEffort::Light
                             || scores.len() < intent.result_need.limit)
                     {
-                        match self.models.embed(std::slice::from_ref(text)).await {
+                        match self.models.embed_query(text).await {
                             Ok((result, provenance)) => {
                                 trace.model_assisted_calls += 1;
                                 let table = nous_memory_retrieval::dense::model_table(
@@ -182,7 +211,7 @@ impl LocalRuntime {
                                             &table,
                                             subject,
                                             &result.vectors[0],
-                                            budget.max_candidates,
+                                            budget.max_candidates.min(8),
                                         )
                                         .await
                                     {
@@ -217,39 +246,55 @@ impl LocalRuntime {
                                                 RecallEffort::Maximum => 3,
                                             };
                                             if max_rounds > 0 {
-                                                let similarities = probe_rows
-                                                    .iter()
-                                                    .map(|row| {
-                                                        row.vector
-                                                            .iter()
-                                                            .zip(&result.vectors[0])
-                                                            .map(|(a, b)| a * b)
-                                                            .sum::<f32>()
-                                                    })
-                                                    .collect::<Vec<_>>();
-                                                let vectors = probe_rows
-                                                    .iter()
-                                                    .map(|row| row.vector.clone())
-                                                    .collect::<Vec<_>>();
-                                                let plan = residual::plan(
+                                                let mut residual = residual::ResidualState::new(
                                                     &result.vectors[0],
-                                                    &vectors,
-                                                    &similarities,
-                                                    max_rounds,
-                                                );
-                                                trace.residual_energy_ratios =
-                                                    plan.energy_ratios.clone();
-                                                trace.residual_stop_reason =
-                                                    plan.stop_reason.clone();
-                                                for vector in plan.vectors {
-                                                    let revisions = projection
-                                                        .search(
+                                                )
+                                                .ok_or_else(|| {
+                                                    Error::Invalid("invalid query embedding".into())
+                                                })?;
+                                                let mut probe = probe_rows;
+                                                let mut search_vector = result.vectors[0].clone();
+                                                for _ in 0..max_rounds {
+                                                    if scores.len() >= budget.max_candidates {
+                                                        trace.residual_stop_reason = Some(
+                                                            "candidate_budget_exhausted".into(),
+                                                        );
+                                                        break;
+                                                    }
+                                                    let vectors: Vec<_> = probe
+                                                        .iter()
+                                                        .take(8)
+                                                        .map(|r| r.vector.clone())
+                                                        .collect();
+                                                    let similarities: Vec<_> = vectors
+                                                        .iter()
+                                                        .map(|v| {
+                                                            v.iter()
+                                                                .zip(&search_vector)
+                                                                .map(|(a, b)| a * b)
+                                                                .sum()
+                                                        })
+                                                        .collect();
+                                                    search_vector = match residual
+                                                        .next(&vectors, &similarities)
+                                                    {
+                                                        Ok(vector) => vector,
+                                                        Err(reason) => {
+                                                            trace.residual_stop_reason =
+                                                                Some(reason.into());
+                                                            break;
+                                                        }
+                                                    };
+                                                    probe = projection
+                                                        .search_rows(
                                                             &table,
                                                             subject,
-                                                            &vector,
+                                                            &search_vector,
                                                             budget.max_candidates,
                                                         )
                                                         .await?;
+                                                    let revisions: Vec<_> =
+                                                        probe.iter().map(|r| r.revision).collect();
                                                     let rows=sqlx::query("SELECT revision_id,object_id FROM memory_revisions WHERE subject_id=$1 AND revision_id=ANY($2)").bind(subject.0).bind(&revisions).fetch_all(self.store.pool()).await.map_err(db)?;
                                                     let map: BTreeMap<Uuid, Uuid> = rows
                                                         .iter()
@@ -262,15 +307,20 @@ impl LocalRuntime {
                                                             ))
                                                         })
                                                         .collect::<Result<_>>()?;
-                                                    let ids: Vec<Uuid> = revisions
+                                                    let ids: Vec<_> = revisions
                                                         .iter()
                                                         .filter_map(|id| map.get(id).copied())
                                                         .collect();
-                                                    let added = ids
-                                                        .iter()
-                                                        .filter(|id| !scores.contains_key(id))
-                                                        .count();
-                                                    fuse(&mut scores, &ids);
+                                                    let before = scores.len();
+                                                    for (rank, id) in ids.iter().enumerate() {
+                                                        if scores.contains_key(id)
+                                                            || scores.len() < budget.max_candidates
+                                                        {
+                                                            *scores.entry(*id).or_insert(0.0) +=
+                                                                1.0 / (32.0 + rank as f64);
+                                                        }
+                                                    }
+                                                    let added = scores.len() - before;
                                                     trace.residual_candidates_added += added;
                                                     trace.residual_rounds += 1;
                                                     trace.index_queries += 1;
@@ -278,6 +328,17 @@ impl LocalRuntime {
                                                         "residual_dense_{}",
                                                         trace.residual_rounds
                                                     ));
+                                                    if added == 0 {
+                                                        trace.residual_stop_reason =
+                                                            Some("no_novel_candidate".into());
+                                                        break;
+                                                    }
+                                                }
+                                                trace.residual_energy_ratios =
+                                                    residual.energy_ratios;
+                                                if trace.residual_stop_reason.is_none() {
+                                                    trace.residual_stop_reason =
+                                                        Some("round_budget_exhausted".into());
                                                 }
                                             }
                                         }
@@ -358,7 +419,7 @@ impl LocalRuntime {
                 kind: NodeKind::Memory,
                 id: *id,
             }));
-            let config = ActivationConfig::default();
+            let config = self.association_config.clone();
             self.expand_graph(
                 subject,
                 state,
@@ -462,7 +523,7 @@ impl LocalRuntime {
                     row.try_get::<i64, _>("meaningful_uses").map_err(db)? as u64,
                     row.try_get::<DateTime<Utc>, _>("last_use").map_err(db)?,
                     Utc::now(),
-                    0.5,
+                    self.use_decay,
                     row.try_get("retention_hint").map_err(db)?,
                 );
                 let threshold = match intent.effort {

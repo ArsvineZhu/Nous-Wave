@@ -8,38 +8,96 @@ use std::{
 };
 use uuid::Uuid;
 
-const LOCAL_MODEL_IDENTITY: &str = "intfloat/multilingual-e5-small";
-const LOCAL_MODEL_REVISION: &str = "fastembed-6.0.2";
-const LOCAL_PREPROCESSING: &str = "e5-query-or-passage-l2-normalized";
-
 #[derive(Clone)]
 pub struct LocalEmbeddingModel {
     model: Arc<Mutex<fastembed::TextEmbedding>>,
+    gate: Arc<tokio::sync::Semaphore>,
+    provenance: ProcessorProvenance,
+    e5_prefix: bool,
 }
 
 impl LocalEmbeddingModel {
-    pub async fn load(cache_dir: PathBuf) -> Result<Self> {
+    pub async fn load(cache_dir: PathBuf, identity: &str) -> Result<Self> {
+        let selected = match identity {
+            "BAAI/bge-m3" => fastembed::EmbeddingModel::BGEM3,
+            "intfloat/multilingual-e5-base" => fastembed::EmbeddingModel::MultilingualE5Base,
+            "intfloat/multilingual-e5-small" => fastembed::EmbeddingModel::MultilingualE5Small,
+            _ => return Err(Error::Invalid("unsupported local embedding model".into())),
+        };
+        let identity = identity.to_owned();
         tokio::task::spawn_blocking(move || {
-            let options =
-                fastembed::TextInitOptions::new(fastembed::EmbeddingModel::MultilingualE5Small)
-                    .with_cache_dir(cache_dir)
-                    .with_show_download_progress(false)
-                    .with_intra_threads(2);
+            let options = fastembed::TextInitOptions::new(selected.clone())
+                .with_cache_dir(cache_dir.clone())
+                .with_show_download_progress(false)
+                .with_intra_threads(2);
             let model = fastembed::TextEmbedding::try_new(options).map_err(|error| {
                 Error::Unavailable(format!("local embedding model failed to load: {error}"))
             })?;
+            let revision = std::fs::read_to_string(
+                cache_dir
+                    .join(format!("models--{}", identity.replace('/', "--")))
+                    .join("refs/main"),
+            )
+            .map_err(|e| {
+                Error::Unavailable(format!("local model asset identity unavailable: {e}"))
+            })?;
+            let e5_prefix = identity.starts_with("intfloat/");
+            let preprocessing = if e5_prefix {
+                "e5-query-passage-l2-v1"
+            } else {
+                "identity-l2-v1"
+            }
+            .to_string();
+            let dimension = fastembed::TextEmbedding::get_model_info(&selected)
+                .map_err(|e| Error::Invalid(e.to_string()))?
+                .dim;
+            let config_digest = blake3::hash(
+                format!("fastembed-6.0.2:{identity}:{revision}:{preprocessing}:{dimension}")
+                    .as_bytes(),
+            )
+            .to_hex()
+            .to_string();
             Ok(Self {
                 model: Arc::new(Mutex::new(model)),
+                gate: Arc::new(tokio::sync::Semaphore::new(1)),
+                provenance: ProcessorProvenance {
+                    identity,
+                    revision: revision.trim().into(),
+                    preprocessing,
+                    config_digest,
+                },
+                e5_prefix,
             })
         })
         .await
         .map_err(|error| Error::Infrastructure(error.to_string()))?
     }
 
-    pub async fn embed(&self, texts: &[String]) -> Result<(EmbeddingResult, ProcessorProvenance)> {
+    pub async fn embed(
+        &self,
+        texts: &[String],
+        query: bool,
+    ) -> Result<(EmbeddingResult, ProcessorProvenance)> {
+        let permit = self
+            .gate
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::Unavailable("local embedding closed".into()))?;
         let model = self.model.clone();
-        let inputs = texts.to_vec();
+        let inputs: Vec<String> = texts
+            .iter()
+            .map(|text| {
+                if self.e5_prefix {
+                    format!("{}: {text}", if query { "query" } else { "passage" })
+                } else {
+                    text.clone()
+                }
+            })
+            .collect();
+        let provenance = self.provenance.clone();
         tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let mut guard = model
                 .lock()
                 .map_err(|_| Error::Infrastructure("local embedding lock poisoned".into()))?;
@@ -49,28 +107,17 @@ impl LocalEmbeddingModel {
             let vectors = vectors
                 .into_iter()
                 .map(|mut vector| {
-                    normalize_vector(&mut vector);
-                    vector
+                    normalize_vector(&mut vector)?;
+                    Ok(vector)
                 })
-                .collect::<Vec<_>>();
-            let config_digest = blake3::hash(
-                format!("{LOCAL_MODEL_IDENTITY}:{LOCAL_MODEL_REVISION}:{LOCAL_PREPROCESSING}")
-                    .as_bytes(),
-            )
-            .to_hex()
-            .to_string();
+                .collect::<Result<Vec<_>>>()?;
             Ok((
                 EmbeddingResult {
-                    model: LOCAL_MODEL_IDENTITY.into(),
-                    revision: LOCAL_MODEL_REVISION.into(),
+                    model: provenance.identity.clone(),
+                    revision: provenance.revision.clone(),
                     vectors,
                 },
-                ProcessorProvenance {
-                    identity: LOCAL_MODEL_IDENTITY.into(),
-                    revision: LOCAL_MODEL_REVISION.into(),
-                    preprocessing: LOCAL_PREPROCESSING.into(),
-                    config_digest,
-                },
+                provenance,
             ))
         })
         .await
@@ -200,7 +247,7 @@ impl ModelServices {
 
     pub async fn embed(&self, texts: &[String]) -> Result<(EmbeddingResult, ProcessorProvenance)> {
         if let Some(model) = &self.local_embedding {
-            return model.embed(texts).await;
+            return model.embed(texts, false).await;
         }
         let config = self
             .embedding
@@ -224,9 +271,16 @@ impl ModelServices {
             .map_err(|_| Error::Invalid("invalid embedding response schema".into()))?;
         validate_embedding(&result, config, texts.len())?;
         for vector in &mut result.vectors {
-            normalize_vector(vector);
+            normalize_vector(vector)?;
         }
         Ok((result, config.provenance()?))
+    }
+
+    pub async fn embed_query(&self, text: &str) -> Result<(EmbeddingResult, ProcessorProvenance)> {
+        if let Some(model) = &self.local_embedding {
+            return model.embed(&[text.to_owned()], true).await;
+        }
+        self.embed(&[text.to_owned()]).await
     }
 
     pub async fn rerank(
@@ -350,17 +404,21 @@ fn validate_embedding(
     Ok(())
 }
 
-fn normalize_vector(vector: &mut [f32]) {
+fn normalize_vector(vector: &mut [f32]) -> Result<()> {
     let norm = vector
         .iter()
         .map(|value| f64::from(*value) * f64::from(*value))
         .sum::<f64>()
         .sqrt();
-    if norm.is_finite() && norm > f64::EPSILON {
-        for value in vector {
-            *value = (*value as f64 / norm) as f32;
-        }
+    if !norm.is_finite() || norm <= f64::EPSILON {
+        return Err(Error::Invalid(
+            "embedding must have a finite nonzero norm".into(),
+        ));
     }
+    for value in vector {
+        *value = (*value as f64 / norm) as f32;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

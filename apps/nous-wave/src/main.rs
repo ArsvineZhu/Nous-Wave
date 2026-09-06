@@ -1,10 +1,15 @@
 use axum::{Json, Router, extract::State, routing::get};
 use clap::{Parser, Subcommand};
+use futures::StreamExt;
 use nous_core::{Error, Result};
 use nous_memory_service::{LocalRuntime, RuntimeStatus};
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod http;
+#[cfg(test)]
+#[path = "../../../crates/memory-service/tests/support/mod.rs"]
+mod support;
 
 #[derive(Parser)]
 #[command(version, about = "Nous Wave cognitive substrate")]
@@ -24,9 +29,16 @@ enum Command {
         command: SubjectCommand,
     },
     Material {
-        subject: uuid::Uuid,
-        #[arg(long)]
-        input: PathBuf,
+        #[command(subcommand)]
+        command: MaterialCommand,
+    },
+    Source {
+        #[command(subcommand)]
+        command: SourceCommand,
+    },
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommand,
     },
     Recall {
         subject: uuid::Uuid,
@@ -55,10 +67,76 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum SubjectCommand {
-    Create {
+enum MaterialCommand {
+    Ingest {
+        subject: uuid::Uuid,
         #[arg(long)]
         input: PathBuf,
+    },
+    Upload {
+        subject: uuid::Uuid,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        metadata: PathBuf,
+    },
+    Status {
+        subject: uuid::Uuid,
+        source: uuid::Uuid,
+    },
+    Derive {
+        subject: uuid::Uuid,
+        #[arg(long)]
+        input: PathBuf,
+    },
+    ToolObservation {
+        subject: uuid::Uuid,
+        #[arg(long)]
+        input: PathBuf,
+    },
+}
+#[derive(Subcommand)]
+enum SourceCommand {
+    Show {
+        subject: uuid::Uuid,
+        source: uuid::Uuid,
+    },
+}
+#[derive(Subcommand)]
+enum ArtifactCommand {
+    Show {
+        subject: uuid::Uuid,
+        artifact: uuid::Uuid,
+    },
+    Get {
+        subject: uuid::Uuid,
+        artifact: uuid::Uuid,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    Lineage {
+        subject: uuid::Uuid,
+        artifact: uuid::Uuid,
+    },
+}
+
+#[derive(Subcommand)]
+enum SubjectCommand {
+    Create {
+        #[arg(
+            long,
+            required_unless_present = "seed_file",
+            conflicts_with = "seed_file"
+        )]
+        input: Option<PathBuf>,
+        #[arg(long)]
+        seed_file: Option<PathBuf>,
+        #[arg(long, default_value = "application/octet-stream")]
+        media_type: String,
+        #[arg(long, default_value = "host:cli")]
+        authored_by: String,
+        #[arg(long)]
+        label: Option<String>,
     },
     Show {
         subject: uuid::Uuid,
@@ -76,6 +154,12 @@ enum SubjectCommand {
 
 #[derive(Subcommand)]
 enum CycleCommand {
+    Recall {
+        subject: uuid::Uuid,
+        cycle: uuid::Uuid,
+        #[arg(long)]
+        input: PathBuf,
+    },
     Begin {
         subject: uuid::Uuid,
         #[arg(long)]
@@ -102,6 +186,14 @@ enum CycleCommand {
 }
 #[derive(Subcommand)]
 enum MemoryCommand {
+    EpisodeMembership {
+        subject: uuid::Uuid,
+        object: uuid::Uuid,
+    },
+    Associations {
+        subject: uuid::Uuid,
+        object: uuid::Uuid,
+    },
     Show {
         subject: uuid::Uuid,
         object: uuid::Uuid,
@@ -147,6 +239,7 @@ enum BundleCommand {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Config {
     server: Server,
     microsystems: MicroSystems,
@@ -155,22 +248,30 @@ struct Config {
     retrieval: Retrieval,
     #[serde(default)]
     models: Models,
+    #[serde(default)]
+    association: nous_memory_retrieval::association::ActivationConfig,
+    #[serde(default)]
+    accessibility: Accessibility,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Server {
     bind: SocketAddr,
     remote_access: bool,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MicroSystems {
     memory: bool,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Postgres {
     url: String,
     max_connections: u32,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Objects {
     backend: String,
     root: String,
@@ -181,10 +282,32 @@ fn default_max_upload_bytes() -> u64 {
     8 * 1024 * 1024 * 1024
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Retrieval {
     lancedb_uri: String,
+    #[serde(default = "default_effort")]
+    default_effort: nous_memory_domain::recall::RecallEffort,
+    #[serde(default)]
+    budgets: std::collections::BTreeMap<
+        nous_memory_domain::recall::RecallEffort,
+        nous_memory_service::recall::RecallBudget,
+    >,
+}
+fn default_effort() -> nous_memory_domain::recall::RecallEffort {
+    nous_memory_domain::recall::RecallEffort::Normal
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Accessibility {
+    use_decay: f64,
+}
+impl Default for Accessibility {
+    fn default() -> Self {
+        Self { use_decay: 0.5 }
+    }
 }
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct Models {
     #[serde(default)]
     embedding: Model,
@@ -194,6 +317,7 @@ struct Models {
     generation: Model,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Model {
     #[serde(default)]
     enabled: bool,
@@ -284,7 +408,24 @@ async fn run() -> Result<()> {
             "current object repository requires backend=fs".into(),
         ));
     }
-    let runtime = LocalRuntime::open_with_options(
+    config.association.validate()?;
+    for budget in config.retrieval.budgets.values() {
+        budget.validate()?;
+    }
+    if !config.accessibility.use_decay.is_finite()
+        || config.accessibility.use_decay <= 0.0
+        || config.accessibility.use_decay > 1.0
+    {
+        return Err(Error::Invalid(
+            "accessibility.use_decay must be in (0,1]".into(),
+        ));
+    }
+    if !matches!(config.models.embedding.mode.as_str(), "local" | "http") {
+        return Err(Error::Invalid(
+            "embedding mode must be local or http".into(),
+        ));
+    }
+    let mut runtime = LocalRuntime::open_with_options(
         &config.postgres.url,
         config.postgres.max_connections,
         &config.object_store.root,
@@ -297,17 +438,23 @@ async fn run() -> Result<()> {
     )
     .await?
     .with_models({
-        let embedding = config.models.embedding;
+        let mut embedding = config.models.embedding;
         let local = if embedding.enabled && embedding.mode == "local" {
             let cache_dir = if embedding.cache_dir.is_empty() {
                 PathBuf::from("models")
             } else {
                 PathBuf::from(&embedding.cache_dir)
             };
-            Some(nous_memory_service::models::LocalEmbeddingModel::load(cache_dir).await?)
+            Some(
+                nous_memory_service::models::LocalEmbeddingModel::load(cache_dir, &embedding.model)
+                    .await?,
+            )
         } else {
             None
         };
+        if local.is_some() {
+            embedding.enabled = false;
+        }
         let services = nous_memory_service::models::ModelServices::new(
             Some(model_endpoint(embedding)),
             Some(model_endpoint(config.models.rerank)),
@@ -317,11 +464,54 @@ async fn run() -> Result<()> {
             services.with_local_embedding(model)
         })
     });
+    runtime.default_effort = config.retrieval.default_effort;
+    runtime.recall_budgets = config.retrieval.budgets;
+    runtime.association_config = config.association;
+    runtime.use_decay = config.accessibility.use_decay;
     match cli.command {
-        Command::Material { subject, input } => println!("{}", serde_json::to_string(&runtime.ingest(nous_core::SubjectId(subject), read_input(input).await?).await?).map_err(|e|Error::Infrastructure(e.to_string()))?),
-        Command::Recall { subject, input } => println!("{}", serde_json::to_string(&runtime.recall(nous_core::SubjectId(subject), read_input(input).await?).await?).map_err(|e|Error::Infrastructure(e.to_string()))?),
+        Command::Material { command } => {
+            let output = match command {
+                MaterialCommand::Ingest { subject, input } => serde_json::to_value(runtime.ingest(nous_core::SubjectId(subject), read_input(input).await?).await?),
+                MaterialCommand::Status { subject, source } => serde_json::to_value(runtime.material_status(nous_core::SubjectId(subject), source).await?),
+                MaterialCommand::Derive { subject, input } => serde_json::to_value(runtime.submit_derivation(nous_core::SubjectId(subject), read_input(input).await?).await?),
+                MaterialCommand::ToolObservation { subject, input } => serde_json::to_value(runtime.record_tool_observation(nous_core::SubjectId(subject), read_input(input).await?).await?),
+                MaterialCommand::Upload { subject, file, metadata } => {
+                    let metadata_file = tokio::fs::File::open(metadata).await.map_err(|e| Error::Invalid(e.to_string()))?;
+                    let mut metadata_bytes = Vec::new();
+                    metadata_file.take(65537).read_to_end(&mut metadata_bytes).await.map_err(|e| Error::Invalid(e.to_string()))?;
+                    if metadata_bytes.len() > 65536 { return Err(Error::Invalid("metadata exceeds 64 KiB".into())); }
+                    let metadata = serde_json::from_slice(&metadata_bytes).map_err(|e| Error::Invalid(e.to_string()))?;
+                    let file = tokio::fs::File::open(file).await.map_err(|e| Error::Invalid(e.to_string()))?;
+                    let chunks = futures::stream::try_unfold(file, |mut file| async move {
+                        let mut bytes = vec![0; 1024 * 1024];
+                        let size = file.read(&mut bytes).await.map_err(|e| Error::Infrastructure(e.to_string()))?;
+                        if size == 0 { return Ok(None); }
+                        bytes.truncate(size);
+                        Ok(Some((bytes, file)))
+                    });
+                    serde_json::to_value(runtime.ingest_stream(nous_core::SubjectId(subject), metadata, chunks).await?)
+                }
+            }.map_err(|e| Error::Infrastructure(e.to_string()))?;
+            println!("{output}");
+        }
+        Command::Source { command: SourceCommand::Show { subject, source } } => println!("{}", runtime.source_show(nous_core::SubjectId(subject), source).await?),
+        Command::Artifact { command } => {
+            match command {
+                ArtifactCommand::Show { subject, artifact } => println!("{}", serde_json::to_value(runtime.artifact(nous_core::SubjectId(subject), artifact).await?).map_err(|e| Error::Infrastructure(e.to_string()))?),
+                ArtifactCommand::Lineage { subject, artifact } => println!("{}", runtime.artifact_lineage(nous_core::SubjectId(subject), artifact).await?),
+                ArtifactCommand::Get { subject, artifact, output } => {
+                    let (_, stream) = runtime.artifact_stream(nous_core::SubjectId(subject), artifact).await?;
+                    let mut file = tokio::fs::File::create(output).await.map_err(|e| Error::Invalid(e.to_string()))?;
+                    futures::pin_mut!(stream);
+                    while let Some(chunk) = stream.next().await { file.write_all(&chunk?).await.map_err(|e| Error::Infrastructure(e.to_string()))?; }
+                    file.flush().await.map_err(|e| Error::Infrastructure(e.to_string()))?;
+                }
+            }
+        }
+        Command::Recall { subject, input } => println!("{}", serde_json::to_string(&runtime.recall(nous_core::SubjectId(subject), runtime.recall_input(read_input(input).await?)?).await?).map_err(|e|Error::Infrastructure(e.to_string()))?),
         Command::Cycle { command } => {
             let output=match command {
+                CycleCommand::Recall {subject,cycle,input} => { let mut intent = runtime.recall_input(read_input(input).await?)?; intent.cycle_id = Some(cycle); serde_json::to_value(runtime.recall(nous_core::SubjectId(subject),intent).await?) },
                 CycleCommand::Begin {subject,input} => serde_json::to_value(serde_json::json!({"cycle_id":runtime.begin_cycle(nous_core::SubjectId(subject),read_input::<serde_json::Value>(input).await?).await?})),
                 CycleCommand::Inspect {subject,cycle,input} => serde_json::to_value(runtime.inspect_cycle(nous_core::SubjectId(subject),cycle,&read_input::<CliObjectRefs>(input).await?.object_refs).await?),
                 CycleCommand::Feedback {subject,cycle,input} => {runtime.feedback(nous_core::SubjectId(subject),cycle,read_input(input).await?).await?;Ok(serde_json::json!({"status":"accepted"}))},
@@ -331,6 +521,8 @@ async fn run() -> Result<()> {
         }
         Command::Memory { command } => {
             let output=match command {
+                MemoryCommand::EpisodeMembership {subject,object} => serde_json::to_value(runtime.episode_membership(nous_core::SubjectId(subject),object).await?),
+                MemoryCommand::Associations {subject,object} => serde_json::to_value(runtime.association_evidence(nous_core::SubjectId(subject),object).await?),
                 MemoryCommand::Show {subject,object} => serde_json::to_value(runtime.memory(nous_core::SubjectId(subject),object,None).await?),
                 MemoryCommand::History {subject,object} => serde_json::to_value(runtime.memory_history(nous_core::SubjectId(subject),object).await?),
                 MemoryCommand::Correct {subject,object,input} => serde_json::to_value(runtime.correct_memory(nous_core::SubjectId(subject),object,read_input(input).await?).await?),
@@ -351,8 +543,14 @@ async fn run() -> Result<()> {
         }
         Command::Subject { command } => {
             let output = match command {
-                SubjectCommand::Create { input } => {
-                    serde_json::to_value(runtime.create_subject(read_input(input).await?).await?)
+                SubjectCommand::Create { input, seed_file, media_type, authored_by, label } => {
+                    let input = if let Some(input) = input { read_input(input).await? } else {
+                        let file = tokio::fs::File::open(seed_file.ok_or_else(|| Error::Invalid("seed file required".into()))?).await.map_err(|e| Error::Invalid(e.to_string()))?;
+                        let mut bytes = vec![];
+                        file.take(runtime.max_upload_bytes.saturating_add(1)).read_to_end(&mut bytes).await.map_err(|e| Error::Invalid(e.to_string()))?;
+                        nous_memory_service::subjects::CreateSubject { api_version: 1, label, metadata: serde_json::json!({}), memory_enabled: true, character_seed: nous_memory_service::subjects::SeedInput { content: nous_memory_service::subjects::SeedContent::InlineBytes { bytes, media_type }, authored_by } }
+                    };
+                    serde_json::to_value(runtime.create_subject(input).await?)
                 }
                 SubjectCommand::Show { subject } => {
                     serde_json::to_value(runtime.subject(nous_core::SubjectId(subject)).await?)
@@ -421,4 +619,43 @@ async fn read_input<T: serde::de::DeserializeOwned>(path: PathBuf) -> Result<T> 
         .await
         .map_err(|e| Error::Invalid(e.to_string()))?;
     serde_json::from_slice(&bytes).map_err(|e| Error::Invalid(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn configuration_is_strict_and_cli_exposes_material_paths() {
+        let text = include_str!("../../../config.example.toml");
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.object_store.max_upload_bytes, 8 * 1024 * 1024 * 1024);
+        assert_eq!(
+            config.retrieval.budgets[&default_effort()].max_candidates,
+            64
+        );
+        let invalid = text.replace(
+            "max_upload_bytes = 8589934592",
+            "inline_payload_max_bytes = 4096",
+        );
+        assert!(toml::from_str::<Config>(&invalid).is_err());
+        let subject = uuid::Uuid::now_v7().to_string();
+        assert!(
+            Cli::try_parse_from([
+                "nous-wave",
+                "material",
+                "upload",
+                &subject,
+                "--file",
+                "a.bin",
+                "--metadata",
+                "meta.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["nous-wave", "subject", "create", "--seed-file", "seed.txt"])
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from(["nous-wave", "subject", "create"]).is_err());
+    }
 }

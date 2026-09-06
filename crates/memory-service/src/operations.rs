@@ -93,6 +93,8 @@ impl LocalRuntime {
                     input.operation_id,
                     result.created.len()
                 ),
+                "DUPLICATE_CONSOLIDATION",
+                serde_json::json!({"parent_objects": group.iter().map(|m| m.object_id).collect::<Vec<_>>()}),
             )
             .await?;
             for parent in group {
@@ -135,6 +137,8 @@ impl LocalRuntime {
                     input.operation_id,
                     result.created.len()
                 ),
+                "EPISODE_ABSTRACTION",
+                serde_json::json!({"parent_objects": group.iter().map(|m| m.object_id).collect::<Vec<_>>()}),
             )
             .await?;
             for parent in group {
@@ -149,6 +153,7 @@ impl LocalRuntime {
     }
 
     pub async fn rebuild_projection(&self, subject: SubjectId) -> Result<usize> {
+        self.require_memory(subject).await?;
         let _objects = self.objects.reference_guard(true).await?;
         self.rebuild_projection_unlocked(subject).await
     }
@@ -188,7 +193,7 @@ impl LocalRuntime {
         Ok(count)
     }
 }
-fn merge_support(group: &[MemoryView], mut draft: MemoryDraft) -> MemoryDraft {
+pub(crate) fn merge_support(group: &[MemoryView], mut draft: MemoryDraft) -> MemoryDraft {
     draft.source_refs = group
         .iter()
         .flat_map(|m| m.content.source_refs.iter().copied())

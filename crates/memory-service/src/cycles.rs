@@ -75,6 +75,7 @@ impl LocalRuntime {
     }
 
     pub(crate) async fn check_cycle(&self, subject: SubjectId, cycle: Uuid) -> Result<()> {
+        self.require_memory(subject).await?;
         let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cognitive_cycles WHERE subject_id=$1 AND cycle_id=$2 AND process_id=$3 AND status='active')")
             .bind(subject.0).bind(cycle).bind(self.process_id).fetch_one(self.store.pool()).await.map_err(db)?;
         if !active {

@@ -1,36 +1,58 @@
 # Nous Wave
 
-Standalone cognitive substrate. The governing implementation package is
-[nous_wave_spec_package/README.md](nous_wave_spec_package/README.md), with execution
-stages in [12-IMPLEMENTATION-PLAN.md](nous_wave_spec_package/12-IMPLEMENTATION-PLAN.md).
-The package remains canonical in its original directory to preserve existing references.
+Nous Wave is a standalone cognitive substrate with Subject Core and an optional
+Memory MicroSystem. The active implementation authority is the
+[Memory Product Closure spec](docs/Nous_Wave_Memory_Product_Closure_Spec_2026-09-06.md).
 
-## Implementation status
+Closure is in progress. Gate A (Memory Product) and Gate B (source-less Windows
+release) have not passed. No standalone release is currently qualified.
 
-Implementation is in progress. The current local runtime opens PostgreSQL, runs SQLx
-migrations, opens the OpenDAL filesystem repository and the LanceDB projection, and
-exposes process health and dependency status. These checks do not establish that
-Subject Core or Memory operations are complete; semantic readiness remains unavailable.
+The implementation includes PostgreSQL canonical state, immutable CAS artifacts,
+LanceDB retrieval projections, source-grounded memory formation, correction,
+suppression, purge, cognitive work cycles and schema V2 export/import. Material
+input supports text/JSON, existing artifacts and bounded streaming file upload;
+artifact bytes can be streamed back through HTTP or CLI.
 
-## Developer prerequisites
+Memory availability is separate from Subject enablement. Disabling the global
+Memory capability leaves Subject Core and material storage usable. Enabled Memory
+with unavailable embedding or dense projection reports degradation.
 
-- Rust 1.98.1 (selected by `rust-toolchain.toml`).
-- PostgreSQL 18.x; the reference development runtime is 18.6.
-- Native Rust build tools for the platform (MSVC on Windows).
-- `protoc` on PATH, or `PROTOC` set to its absolute executable path. The selected
-  LanceDB dependency graph requires it.
+Local FastEmbed and external HTTP embedding paths are implemented. The fixed
+multilingual model bake-off and retrieval ablations are still pending; the current
+local model choice is provisional. External generation/rerank services have not
+been deployed, so their live-provider effectiveness remains `NOT_RUN`.
 
-Copy `nous_wave_spec_package/config.example.toml` to ignored `config.toml`, set local
-database/object/index paths, and supply credentials through `NOUS_WAVE_POSTGRES_URL`.
-Run `cargo run -p nous-wave -- serve` or `cargo run -p nous-wave -- status`.
-The runtime currently accepts loopback binding only.
+## Development
 
-Model-provider integration is implemented as bounded HTTP adapters with identity,
-revision, preprocessing and response-schema validation. No embedding, reranking or
-structured-generation endpoint is deployed in the current environment, so provider
-quality/effectiveness evaluation is `NOT_RUN`; raw ingestion, lexical/exact recall,
-association, accessibility and all storage tests remain model-independent.
+Use Rust 1.98.1, native build tools (MSVC on Windows), and `protoc` on PATH or in
+`PROTOC`. Real integration tests start disposable PostgreSQL 18.6 instances using
+PostgreSQL Embedded 0.21.0 and exercise real CAS/LanceDB mechanics. Set
+`POSTGRESQL_VERSION=18.6.0` for the pinned bundled database build.
 
-Verification: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-and `cargo test --workspace`. Real storage integration checks require their explicitly
-documented local dependencies; unexecuted integration checks are not passing evidence.
+Copy [config.example.toml](config.example.toml) to ignored `config.toml`, configure
+an external PostgreSQL 18 database, and run `cargo run -p nous-wave -- status` or
+`cargo run -p nous-wave -- serve`. `NOUS_WAVE_POSTGRES_URL` overrides the configured
+connection string. Current service binding is loopback only.
+
+CLI operations are discoverable with `--help`. File I/O examples:
+
+```text
+nous-wave material ingest SUBJECT --input material.json
+nous-wave material upload SUBJECT --file document.bin --metadata envelope.json
+nous-wave source show SUBJECT SOURCE
+nous-wave artifact show SUBJECT ARTIFACT
+nous-wave artifact get SUBJECT ARTIFACT --output document.bin
+nous-wave artifact lineage SUBJECT ARTIFACT
+```
+
+Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`
+and `cargo test --workspace` at integration boundaries. Passing these commands does
+not establish the unrun algorithm bake-off or portable-release claims.
+
+## Research attribution
+
+VCP TagMemo/RiverMemo informs the independently implemented residual cue recovery,
+competitive activation, request-flow observation and direct-anchor design described
+in the active spec. VCP code, constants, protocol and file structure are not imported;
+VCP is not a dependency. This attribution does not establish algorithm effectiveness,
+which requires the spec's fixed evaluation fixtures.

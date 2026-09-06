@@ -17,6 +17,7 @@ pub struct AssociationEdge {
     pub target_inbound_degree: usize,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActivationConfig {
     pub outbound_mass: f64,
     pub backtrack_factor: f64,
@@ -156,7 +157,7 @@ impl ActivationState {
             neighbors.sort_by_key(|edge| (edge.to, edge.evidence_id));
         }
         let mut trace = ActivationTrace::default();
-        let mut positive_masses = Vec::new();
+        let mut positive_masses = BTreeMap::<Uuid, f64>::new();
         let mut emergent_mass = 0.0_f64;
         while trace.states_expanded < state_budget && trace.edges_visited < edge_budget {
             let Some(current) = self.frontier.pop() else {
@@ -180,6 +181,7 @@ impl ActivationState {
             };
             // Do not consume a partial adjacency and pretend its region is exhausted.
             if neighbors.len() > edge_budget - trace.edges_visited {
+                trace.budget_truncated = true;
                 self.frontier.push(current);
                 break;
             }
@@ -204,10 +206,6 @@ impl ActivationState {
                 if mass < config.min_activation {
                     continue;
                 }
-                positive_masses.push(mass);
-                if !self.seeds.contains(&edge.to) {
-                    emergent_mass += mass;
-                }
                 let key = (current.seed, edge.to);
                 if self
                     .best
@@ -217,7 +215,12 @@ impl ActivationState {
                     continue;
                 }
                 if !self.best.contains_key(&key) && self.best.len() >= total_state_limit {
+                    trace.budget_truncated = true;
                     continue;
+                }
+                *positive_masses.entry(edge.evidence_id).or_default() += mass;
+                if !self.seeds.contains(&edge.to) {
+                    emergent_mass += mass;
                 }
                 let mut path = current.path.clone();
                 path.push(edge.evidence_id);
@@ -243,12 +246,12 @@ impl ActivationState {
         trace.remaining_frontier = self.frontier.len();
         trace.activation_seed_count = self.seeds.len();
         trace.actual_flow_edges = positive_masses.len();
-        trace.budget_truncated = trace.remaining_frontier > 0
+        trace.budget_truncated |= trace.remaining_frontier > 0
             && (trace.states_expanded >= state_budget || trace.edges_visited >= edge_budget);
-        let total_mass = positive_masses.iter().sum::<f64>();
+        let total_mass = positive_masses.values().sum::<f64>();
         if positive_masses.len() >= 2 && total_mass.is_finite() && total_mass > 0.0 {
             let entropy = positive_masses
-                .iter()
+                .values()
                 .map(|mass| {
                     let probability = *mass / total_mass;
                     -probability * probability.ln()
@@ -260,7 +263,7 @@ impl ActivationState {
             trace.positive_flow_entropy = 0.0;
         }
         trace.emergent_support_ratio = if total_mass > 0.0 {
-            (emergent_mass / total_mass).clamp(0.0, 1.0)
+            (emergent_mass / (total_mass + self.seeds.len() as f64)).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -274,6 +277,9 @@ impl ActivationState {
         let mut scores = BTreeMap::new();
         let divisor = self.seeds.len().max(1) as f64;
         for support in self.best.values() {
+            if support.path.is_empty() {
+                continue;
+            }
             *scores.entry(support.target).or_insert(0.0) += support.activation / divisor;
         }
         scores

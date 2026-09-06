@@ -9,8 +9,10 @@ publish.workspace = true
 nous-core.workspace = true
 nous-memory-service.workspace = true
 nous-memory-domain.workspace = true
+nous-memory-retrieval.workspace = true
 tokio.workspace = true
 axum.workspace = true
+multer.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,3 +21,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 futures.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+postgresql_embedded.workspace = true
+reqwest.workspace = true
+sqlx.workspace = true

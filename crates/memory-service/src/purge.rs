@@ -37,6 +37,7 @@ pub struct PurgeResult {
 
 impl LocalRuntime {
     pub async fn purge(&self, subject: SubjectId, input: PurgeRequest) -> Result<PurgeResult> {
+        self.require_memory(subject).await?;
         check_version(input.api_version)?;
         let _objects = self.objects.reference_guard(true).await?;
         let request = serde_json::to_value(&input).map_err(|e| Error::Invalid(e.to_string()))?;

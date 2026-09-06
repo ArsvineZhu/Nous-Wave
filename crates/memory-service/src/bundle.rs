@@ -151,6 +151,8 @@ impl LocalRuntime {
         root: impl AsRef<Path>,
     ) -> Result<BundleManifest> {
         let _guard = self.objects.reference_guard(false).await?;
+        let mut snapshot_guard = self.store.pool().begin().await.map_err(db)?;
+        crate::memory::lock_subject(&mut snapshot_guard, subject).await?;
         let root = root.as_ref();
         let incoherent: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM memory_objects WHERE subject_id=$1 AND availability='regenerating') OR EXISTS(SELECT 1 FROM memory_operation_results WHERE subject_id=$1 AND kind='purge' AND state IN ('physical_pending','running'))",
@@ -266,6 +268,7 @@ impl LocalRuntime {
         write_json(root, "derivations.json", &bundle.derivations).await?;
         write_json(root, "use-events.json", &bundle.use_events).await?;
         write_json(root, "associations.json", &bundle.associations).await?;
+        snapshot_guard.commit().await.map_err(db)?;
         Ok(manifest)
     }
 
@@ -371,6 +374,17 @@ impl LocalRuntime {
             .map(|bundle| {
                 let mut mapped = bundle.clone();
                 mapped.object_id = map_id(&object_map, bundle.object_id);
+                if let Some(parents) = mapped
+                    .formation_metadata
+                    .get_mut("parent_objects")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for parent in parents {
+                        if let Some(id) = parent.as_str().and_then(|v| Uuid::parse_str(v).ok()) {
+                            *parent = serde_json::json!(map_id(&object_map, id));
+                        }
+                    }
+                }
                 for view in &mut mapped.history {
                     view.object_id = mapped.object_id;
                     view.revision_id = map_id(&revision_map, view.revision_id);

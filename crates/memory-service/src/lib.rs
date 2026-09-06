@@ -24,6 +24,11 @@ pub struct LocalRuntime {
     /// Subject-level `memory_enabled` remains a separate persisted decision.
     pub memory_capability: bool,
     pub max_upload_bytes: u64,
+    pub default_effort: nous_memory_domain::recall::RecallEffort,
+    pub recall_budgets:
+        std::collections::BTreeMap<nous_memory_domain::recall::RecallEffort, recall::RecallBudget>,
+    pub association_config: nous_memory_retrieval::association::ActivationConfig,
+    pub use_decay: f64,
     projection_failure: bool,
     pub models: std::sync::Arc<models::ModelServices>,
     pub(crate) process_id: uuid::Uuid,
@@ -95,6 +100,10 @@ impl LocalRuntime {
             projection,
             memory_capability,
             max_upload_bytes,
+            default_effort: nous_memory_domain::recall::RecallEffort::Normal,
+            recall_budgets: Default::default(),
+            association_config: Default::default(),
+            use_decay: 0.5,
             projection_failure,
             models: std::sync::Arc::new(models::ModelServices::new(None, None, None)?),
             process_id: uuid::Uuid::now_v7(),
@@ -118,7 +127,7 @@ impl LocalRuntime {
                     if self.projection_failure {
                         "projection open failed"
                     } else {
-                        "memory disabled"
+                        "dense projection is not configured"
                     }
                     .into(),
                 ),
@@ -134,7 +143,7 @@ impl LocalRuntime {
                     CapabilityStatus {
                         capability_id: "model.embedding".into(),
                         status: Readiness::Ready,
-                        reason: Some("bundled FastEmbed local model loaded".into()),
+                        reason: Some("FastEmbed local model loaded".into()),
                     }
                 } else {
                     model_status("model.embedding", self.models.embedding.as_ref())
@@ -157,7 +166,7 @@ impl LocalRuntime {
                     status: if !self.memory_capability {
                         Readiness::Unavailable
                     } else if postgres && objects {
-                        if self.projection.is_some() {
+                        if self.projection.is_some() && self.models.embedding_available() {
                             Readiness::Ready
                         } else {
                             Readiness::Degraded
@@ -175,6 +184,11 @@ impl LocalRuntime {
                                 "dense projection is unavailable"
                             }
                             .into(),
+                        )
+                    } else if !self.models.embedding_available() {
+                        Some(
+                            "embedding is not configured; dense and residual retrieval unavailable"
+                                .into(),
                         )
                     } else {
                         None

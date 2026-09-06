@@ -1,13 +1,12 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Multipart, Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use nous_core::{Error, SubjectId};
-use nous_memory_domain::recall::RecallIntent;
 use nous_memory_service::{
     LocalRuntime,
     bundle::{ImportRequest, ImportResult},
@@ -29,7 +28,10 @@ pub fn routes() -> Router<LocalRuntime> {
         .route("/v1/subjects/{subject}/seed", post(replace))
         .route("/v1/subjects/{subject}/seed/history", get(history))
         .route("/v1/subjects/{subject}/material", post(ingest))
-        .route("/v1/subjects/{subject}/material/upload", post(upload))
+        .route(
+            "/v1/subjects/{subject}/material/upload",
+            post(upload).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .route(
             "/v1/subjects/{subject}/material/{source}/status",
             get(material_status),
@@ -181,79 +183,79 @@ async fn ingest(
 async fn upload(
     State(runtime): State<LocalRuntime>,
     Path(subject): Path<Uuid>,
-    mut multipart: Multipart,
+    request: Request,
 ) -> Result<impl IntoResponse, Problem> {
-    let mut metadata: Option<UploadMetadata> = None;
-    let mut accepted = None;
-    while let Some(mut field) = multipart
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| Problem(Error::Invalid("multipart content type required".into())))?;
+    let boundary =
+        multer::parse_boundary(content_type).map_err(|e| Problem(Error::Invalid(e.to_string())))?;
+    let mut multipart = multer::Multipart::new(request.into_body().into_data_stream(), boundary);
+    let mut metadata = multipart
         .next_field()
         .await
-        .map_err(|error| Problem(Error::Invalid(format!("invalid multipart body: {error}"))))?
-    {
-        let name = field
-            .name()
-            .ok_or_else(|| Problem(Error::Invalid("multipart parts need names".into())))?
-            .to_owned();
-        match name.as_str() {
-            "metadata" => {
-                if metadata.is_some() {
-                    return Err(Problem(Error::Invalid(
-                        "multipart metadata part must occur once".into(),
-                    )));
-                }
-                let mut bytes = Vec::new();
-                while let Some(chunk) = field.chunk().await.map_err(|error| {
-                    Problem(Error::Invalid(format!("metadata part failed: {error}")))
-                })? {
-                    if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
-                        return Err(Problem(Error::Invalid(
-                            "multipart metadata exceeds 64 KiB".into(),
-                        )));
-                    }
-                    bytes.extend_from_slice(&chunk);
-                }
-                metadata = Some(serde_json::from_slice(&bytes).map_err(|error| {
-                    Problem(Error::Invalid(format!("invalid upload metadata: {error}")))
-                })?);
-            }
-            "content" => {
-                if accepted.is_some() {
-                    return Err(Problem(Error::Invalid(
-                        "multipart content part must occur once".into(),
-                    )));
-                }
-                let metadata = metadata.clone().ok_or_else(|| {
-                    Problem(Error::Invalid(
-                        "multipart metadata must precede content".into(),
-                    ))
-                })?;
-                let stream = futures::stream::try_unfold(field, |mut field| async move {
-                    match field.chunk().await {
-                        Ok(Some(bytes)) => Ok(Some((bytes.to_vec(), field))),
-                        Ok(None) => Ok(None),
-                        Err(error) => Err(Error::Invalid(format!("content part failed: {error}"))),
-                    }
-                });
-                accepted = Some(
-                    runtime
-                        .ingest_stream(SubjectId(subject), metadata, stream)
-                        .await
-                        .map_err(Problem)?,
-                );
-            }
-            _ => {
-                return Err(Problem(Error::Invalid(
-                    "multipart accepts only metadata and content parts".into(),
-                )));
-            }
-        }
+        .map_err(multipart_problem)?
+        .ok_or_else(|| Problem(Error::Invalid("metadata part required".into())))?;
+    if metadata.name() != Some("metadata") {
+        return Err(Problem(Error::Invalid(
+            "metadata must precede content".into(),
+        )));
     }
-    let accepted = accepted.ok_or_else(|| {
-        Problem(Error::Invalid(
-            "multipart upload requires metadata and content parts".into(),
-        ))
-    })?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = metadata.chunk().await.map_err(multipart_problem)? {
+        if bytes.len().saturating_add(chunk.len()) > 65536 {
+            return Err(Problem(Error::Invalid("metadata exceeds 64 KiB".into())));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let input: UploadMetadata =
+        serde_json::from_slice(&bytes).map_err(|e| Problem(Error::Invalid(e.to_string())))?;
+    drop(metadata);
+    let content = multipart
+        .next_field()
+        .await
+        .map_err(multipart_problem)?
+        .ok_or_else(|| Problem(Error::Invalid("content part required".into())))?;
+    if content.name() != Some("content") {
+        return Err(Problem(Error::Invalid(
+            "exactly one content part required".into(),
+        )));
+    }
+    let stream = futures::stream::try_unfold(
+        (content, multipart),
+        |(mut content, mut multipart)| async move {
+            match content
+                .chunk()
+                .await
+                .map_err(|e| Error::Invalid(e.to_string()))?
+            {
+                Some(bytes) => Ok(Some((bytes.to_vec(), (content, multipart)))),
+                None => {
+                    drop(content);
+                    if multipart
+                        .next_field()
+                        .await
+                        .map_err(|e| Error::Invalid(e.to_string()))?
+                        .is_some()
+                    {
+                        return Err(Error::Invalid(
+                            "upload accepts only one metadata and one content part".into(),
+                        ));
+                    }
+                    Ok(None)
+                }
+            }
+        },
+    );
+    let accepted = runtime
+        .ingest_stream(SubjectId(subject), input, stream)
+        .await?;
     Ok((StatusCode::ACCEPTED, Json(accepted)))
+}
+fn multipart_problem(error: multer::Error) -> Problem {
+    Problem(Error::Invalid(format!("invalid multipart body: {error}")))
 }
 async fn tool_observation(
     State(runtime): State<LocalRuntime>,
@@ -303,9 +305,10 @@ async fn artifact_content(
     State(runtime): State<LocalRuntime>,
     Path((subject, artifact)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, Problem> {
-    let metadata = runtime.artifact(SubjectId(subject), artifact).await?;
-    let bytes = runtime.artifact_bytes(SubjectId(subject), artifact).await?;
-    let mut response = Response::new(Body::from(bytes));
+    let (metadata, stream) = runtime
+        .artifact_stream(SubjectId(subject), artifact)
+        .await?;
+    let mut response = Response::new(Body::from_stream(stream));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_str(&metadata.media_type)
@@ -336,9 +339,13 @@ async fn derivation(
 async fn recall(
     State(runtime): State<LocalRuntime>,
     Path(subject): Path<Uuid>,
-    Json(input): Json<RecallIntent>,
+    Json(input): Json<serde_json::Value>,
 ) -> Result<Json<RecallResponse>, Problem> {
-    Ok(Json(runtime.recall(SubjectId(subject), input).await?))
+    Ok(Json(
+        runtime
+            .recall(SubjectId(subject), runtime.recall_input(input)?)
+            .await?,
+    ))
 }
 #[derive(Deserialize)]
 struct CycleBegin {
@@ -522,4 +529,129 @@ async fn import_bundle(
     Ok(Json(
         runtime.import_bundle(input.path, input.request).await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use nous_memory_service::subjects::{SeedContent, SeedInput};
+
+    #[tokio::test]
+    async fn http_upload_streams_and_rejects_malformed_envelopes() {
+        let (_postgres, url, _postgres_root) = crate::support::database().await;
+        let root = tempfile::tempdir().unwrap();
+        let runtime = LocalRuntime::open_with_options(
+            &url,
+            4,
+            root.path().join("objects").to_str().unwrap(),
+            None,
+            false,
+            4 * 1024 * 1024,
+        )
+        .await
+        .unwrap();
+        let subject = runtime
+            .create_subject(CreateSubject {
+                api_version: 1,
+                label: None,
+                metadata: serde_json::json!({}),
+                memory_enabled: true,
+                character_seed: SeedInput {
+                    content: SeedContent::Inline {
+                        content: "seed".into(),
+                        media_type: "text/plain".into(),
+                    },
+                    authored_by: "host:test".into(),
+                },
+            })
+            .await
+            .unwrap()
+            .subject_id;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = routes().with_state(runtime.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let endpoint = format!("http://{address}/v1/subjects/{}/material/upload", subject.0);
+        let metadata = serde_json::json!({"api_version":1,"source_kind":"host:file","classification":{"origin":"HOST","semantic":"test:file","epistemic":"OBSERVED"},"media_type":"application/octet-stream","scope":"test","metadata":{}});
+        let header = format!(
+            "--nw\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--nw\r\nContent-Disposition: form-data; name=\"content\"; filename=\"data.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        );
+        let chunks = futures::stream::iter([Ok::<_, std::io::Error>(header.into_bytes())])
+            .chain(futures::stream::iter(
+                (0..4).map(|_| Ok(vec![91; 1024 * 1024])),
+            ))
+            .chain(futures::stream::iter([Ok(b"\r\n--nw--\r\n".to_vec())]));
+        let response = client
+            .post(&endpoint)
+            .header("content-type", "multipart/form-data; boundary=nw")
+            .body(reqwest::Body::wrap_stream(chunks))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let accepted: serde_json::Value = response.json().await.unwrap();
+        let artifact = accepted["artifact_id"].as_str().unwrap();
+        let mut response = client
+            .get(format!(
+                "http://{address}/v1/subjects/{}/artifacts/{artifact}/content",
+                subject.0
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-length"], "4194304");
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/octet-stream"
+        );
+        assert!(response.headers().contains_key("etag"));
+        let mut size = 0;
+        while let Some(chunk) = response.chunk().await.unwrap() {
+            assert!(chunk.iter().all(|b| *b == 91));
+            size += chunk.len();
+        }
+        assert_eq!(size, 4 * 1024 * 1024);
+        let source_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM source_records WHERE subject_id=$1")
+                .bind(subject.0)
+                .fetch_one(runtime.store.pool())
+                .await
+                .unwrap();
+        let malformed = format!(
+            "--nw\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--nw\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\nsecret\r\n--nw\r\nContent-Disposition: form-data; name=\"extra\"\r\n\r\ninvalid\r\n--nw--\r\n"
+        );
+        let response = client
+            .post(&endpoint)
+            .header("content-type", "multipart/form-data; boundary=nw")
+            .body(malformed)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_client_error());
+        // No source ID is returned, and malformed payloads never reach canonical commit.
+        let count_after: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM source_records WHERE subject_id=$1")
+                .bind(subject.0)
+                .fetch_one(runtime.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(count_after, source_count);
+        let invalid = client
+            .post(&endpoint)
+            .header("content-type", "multipart/form-data; boundary=nw")
+            .body(
+                "--nw\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n".to_owned()
+                    + &"x".repeat(65537)
+                    + "\r\n--nw--\r\n",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert!(invalid.status().is_client_error());
+        server.abort();
+        runtime.store.close().await;
+    }
 }

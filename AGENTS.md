@@ -7,7 +7,7 @@ Execution contract for Nous Wave.
 ```text
 DevelopmentMode = RAPID_EVOLUTION
 CompatibilityEpoch = PRE_PRODUCTION
-CurrentWave = SUBJECT_CORE + COMPLETE_MEMORY_MICROSYSTEM
+CurrentWave = MEMORY_PRODUCT_CLOSURE
 ```
 
 Existing code, tests, schemas, names, packages and development history have no preservation privilege. Rewrite directly when the current spec requires it. Do not add compatibility shims, aliases, fallback readers or dual paths without an explicit compatibility obligation.
@@ -35,7 +35,8 @@ MicroSystem != microservice/plugin marketplace
 
 ## Current scope
 
-Implement Subject Core and the complete Memory MicroSystem.
+Implement [the active closure spec](docs/Nous_Wave_Memory_Product_Closure_Spec_2026-09-06.md).
+Memory Product validation precedes the authorized Windows portable release work.
 
 Do not implement Persona, Social, Epistemic, Goals/Commitments, Reflection, Diary or Dream/Simulation internals. Preserve only the documented cross-MicroSystem boundaries.
 

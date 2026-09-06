@@ -81,6 +81,7 @@ impl LocalRuntime {
         object: Uuid,
         revision: Option<Uuid>,
     ) -> Result<MemoryView> {
+        self.require_memory(subject).await?;
         let row = sqlx::query("SELECT o.object_kind,o.scope,o.availability,o.superseded_by,r.*,COALESCE(s.suppressed,false) AS suppressed,lower(r.occurred) AS occurred_start,upper(r.occurred) AS occurred_end,r.occurred IS NOT NULL AS has_occurred FROM memory_objects o JOIN memory_revisions r ON r.object_id=o.object_id LEFT JOIN memory_current_heads h ON h.object_id=o.object_id LEFT JOIN suppression_state s ON s.object_id=o.object_id WHERE o.subject_id=$1 AND o.object_id=$2 AND r.revision_id=COALESCE($3,h.revision_id)")
             .bind(subject.0).bind(object).bind(revision).fetch_optional(self.store.pool()).await.map_err(db)?
             .ok_or_else(|| Error::NotFound("memory revision not found or unavailable during regeneration".into()))?;
@@ -145,6 +146,7 @@ impl LocalRuntime {
         subject: SubjectId,
         object: Uuid,
     ) -> Result<Vec<MemoryView>> {
+        self.require_memory(subject).await?;
         let revisions: Vec<Uuid> = sqlx::query_scalar("SELECT revision_id FROM memory_revisions WHERE subject_id=$1 AND object_id=$2 ORDER BY recorded_at,revision_id")
             .bind(subject.0).bind(object).fetch_all(self.store.pool()).await.map_err(db)?;
         if revisions.is_empty() {
@@ -193,6 +195,7 @@ impl LocalRuntime {
         object: Uuid,
         input: CorrectMemory,
     ) -> Result<MemoryView> {
+        self.require_memory(subject).await?;
         check_version(input.api_version)?;
         input.replacement.validate()?;
         if input.reason.trim().is_empty()
@@ -248,6 +251,7 @@ impl LocalRuntime {
         suppressed: bool,
         reason: &str,
     ) -> Result<()> {
+        self.require_memory(subject).await?;
         if reason.is_empty() || reason.len() > 4096 {
             return Err(Error::Invalid("suppression needs a bounded reason".into()));
         }
@@ -300,6 +304,8 @@ pub(crate) async fn form_memory(
     subject: SubjectId,
     draft: &MemoryDraft,
     formation_key: &str,
+    formation_class: &str,
+    formation_metadata: serde_json::Value,
 ) -> Result<(Uuid, Uuid)> {
     draft.validate()?;
     if let Some(object) = sqlx::query_scalar::<_, Uuid>(
@@ -320,7 +326,6 @@ pub(crate) async fn form_memory(
         return Ok((object, head));
     }
     let object = Uuid::now_v7();
-    let (formation_class, formation_metadata) = formation_recipe(formation_key, draft);
     sqlx::query("INSERT INTO memory_objects(object_id,subject_id,object_kind,scope,formation_key,formation_class,formation_metadata) VALUES($1,$2,$3,$4,$5,$6,$7)")
         .bind(object).bind(subject.0).bind(enum_name(&draft.kind)?).bind(&draft.scope).bind(formation_key).bind(formation_class).bind(formation_metadata).execute(&mut **tx).await.map_err(db)?;
     sqlx::query("INSERT INTO accessibility_state(object_id) VALUES($1)")
@@ -330,37 +335,6 @@ pub(crate) async fn form_memory(
         .map_err(db)?;
     let revision = write_revision(tx, subject, object, draft, "memory formation", None).await?;
     Ok((object, revision))
-}
-
-fn formation_recipe(formation_key: &str, draft: &MemoryDraft) -> (&'static str, serde_json::Value) {
-    if let Some(rest) = formation_key.strip_prefix("episode:") {
-        return (
-            "HOST_EPISODE",
-            serde_json::json!({"episode_key": rest, "scope": draft.scope}),
-        );
-    }
-    if formation_key.contains(":proposal:") {
-        return (
-            "MODEL_EXTRACT",
-            serde_json::json!({"formation_key": formation_key}),
-        );
-    }
-    if formation_key.starts_with("consolidation:") {
-        return (
-            "DUPLICATE_CONSOLIDATION",
-            serde_json::json!({"formation_key": formation_key}),
-        );
-    }
-    if formation_key.starts_with("abstraction:") {
-        return (
-            "EPISODE_ABSTRACTION",
-            serde_json::json!({"formation_key": formation_key}),
-        );
-    }
-    (
-        "SOURCE_REFERENCE",
-        serde_json::json!({"formation_key": formation_key}),
-    )
 }
 
 pub(crate) async fn write_revision(

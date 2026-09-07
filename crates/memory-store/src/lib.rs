@@ -1,5 +1,7 @@
-use nous_core::{Error, Result};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+//! PostgreSQL Authority repositories and migration ownership.
+
+use nous_core::{Error, Result, SubjectId};
+use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 
 #[derive(Clone)]
 pub struct MemoryStore {
@@ -9,27 +11,14 @@ pub struct MemoryStore {
 impl MemoryStore {
     pub async fn connect(url: &str, max_connections: u32) -> Result<Self> {
         if max_connections == 0 {
-            return Err(Error::Invalid(
-                "postgres.max_connections must be positive".into(),
-            ));
+            return Err(Error::Invalid("max_connections must be positive".into()));
         }
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
-            .acquire_timeout(std::time::Duration::from_secs(10))
+            .acquire_timeout(std::time::Duration::from_secs(15))
             .connect(url)
             .await
             .map_err(database_error)?;
-        let version: String = sqlx::query_scalar("SHOW server_version_num")
-            .fetch_one(&pool)
-            .await
-            .map_err(database_error)?;
-        let version: u32 = version
-            .parse()
-            .map_err(|_| Error::Infrastructure("invalid PostgreSQL version".into()))?;
-        if !(180000..190000).contains(&version) {
-            pool.close().await;
-            return Err(Error::Unavailable("PostgreSQL 18.x is required".into()));
-        }
         Ok(Self { pool })
     }
 
@@ -37,7 +26,7 @@ impl MemoryStore {
         sqlx::migrate!("./migrations")
             .run(&self.pool)
             .await
-            .map_err(|e| Error::Infrastructure(e.to_string()))
+            .map_err(|error| Error::Infrastructure(error.to_string()))
     }
 
     pub async fn check(&self) -> Result<()> {
@@ -48,9 +37,22 @@ impl MemoryStore {
         Ok(())
     }
 
+    pub async fn subject_exists(&self, subject: SubjectId) -> Result<bool> {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM subjects WHERE subject_id=$1)")
+            .bind(subject.0)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(database_error)
+    }
+
+    pub async fn begin(&self) -> Result<Transaction<'_, Postgres>> {
+        self.pool.begin().await.map_err(database_error)
+    }
+
     pub async fn close(&self) {
         self.pool.close().await;
     }
+
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }

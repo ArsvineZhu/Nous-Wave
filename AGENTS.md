@@ -7,7 +7,7 @@ Execution contract for Nous Wave.
 ```text
 DevelopmentMode = RAPID_EVOLUTION
 CompatibilityEpoch = PRE_PRODUCTION
-CurrentWave = MEMORY_PRODUCT_CLOSURE
+CurrentWave = NOUS_WAVE_PRODUCTION_IMPLEMENTATION_2026-09-07
 ```
 
 Existing code, tests, schemas, names, packages and development history have no preservation privilege. Rewrite directly when the current spec requires it. Do not add compatibility shims, aliases, fallback readers or dual paths without an explicit compatibility obligation.
@@ -35,8 +35,9 @@ MicroSystem != microservice/plugin marketplace
 
 ## Current scope
 
-Implement [the active closure spec](docs/Nous_Wave_Memory_Product_Closure_Spec_2026-09-06.md).
-Memory Product validation precedes the authorized Windows portable release work.
+Implement [the active Production Implementation Spec](docs/Nous_Wave/Nous_Wave_Production_Implementation_Spec_2026-09-07.md)
+and use the matching [system description](docs/Nous_Wave/Nous_Wave_System_Description_2026-09-07.md) for semantic context.
+The Production Implementation Spec supersedes the historical Memory Product Closure direction and the old portable-release sequence.
 
 Do not implement Persona, Social, Epistemic, Goals/Commitments, Reflection, Diary or Dream/Simulation internals. Preserve only the documented cross-MicroSystem boundaries.
 
@@ -47,7 +48,10 @@ For generic mechanics, prefer adopted dependencies and standard facilities befor
 Current routes include:
 
 - PostgreSQL + SQLx for canonical structured persistence;
-- LanceDB embedded for local dense retrieval projection;
+- USearch for local dense retrieval projection;
+- Tantivy for fielded lexical retrieval;
+- petgraph CSR for immutable topology serving;
+- nalgebra, roaring, Rayon and arc-swap for the specified retrieval mechanics;
 - Apache OpenDAL for object-storage mechanics;
 - Axum/Tokio for service runtime;
 - mature model-service HTTP clients for inference boundaries.
@@ -75,7 +79,7 @@ Optimize in this order:
 ```text
 avoid unnecessary work
 → route to the correct small candidate space
-→ reuse Cognitive Work Cycle state
+→ reuse immutable ServingGeneration/Session state
 → improve candidate quality
 → improve data structures/indexes
 → add hot caches
@@ -88,7 +92,7 @@ Do not add distributed infrastructure to solve an unmeasured local problem.
 
 Tests protect meaningful contracts and observed algorithmic risks. TDD is optional.
 
-Do not create product architecture solely for testability. Use real PostgreSQL/LanceDB integration where those mechanics are the claim being tested.
+Do not create product architecture solely for testability. Use real PostgreSQL/SQLx and the selected serving libraries where those mechanics are the claim being tested.
 
 Run focused verification during iteration and the full workspace checks at meaningful stage boundaries.
 

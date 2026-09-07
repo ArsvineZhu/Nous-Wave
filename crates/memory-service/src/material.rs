@@ -1,699 +1,432 @@
-use crate::{
-    LocalRuntime,
-    subjects::{check_version, db},
-};
-use chrono::{DateTime, Utc};
-use futures::Stream;
-use nous_core::{Error, Result, SubjectId};
-use nous_material::{
-    Artifact, Classification, Derivation, EpistemicClass, OriginClass, ProcessorProvenance,
-    TemporalRange,
-};
-use serde::{Deserialize, Serialize};
-use sqlx::{Postgres, Row, Transaction};
-use uuid::Uuid;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum MaterialContent {
-    Text {
-        text: String,
-    },
-    Json {
-        value: serde_json::Value,
-    },
-    #[serde(rename = "existing_artifact")]
-    Artifact {
-        artifact_id: Uuid,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IngestMaterial {
-    pub api_version: u32,
-    pub source_kind: String,
-    pub classification: Classification,
-    pub media_type: String,
-    pub scope: String,
-    pub occurred: Option<TemporalRange>,
-    pub observed_at: Option<DateTime<Utc>>,
-    pub actor: Option<String>,
-    pub invocation_id: Option<String>,
-    pub idempotency_key: Option<String>,
-    #[serde(default)]
-    pub parent_sources: Vec<Uuid>,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
-    pub content: MaterialContent,
-}
-
-/// Multipart metadata is the canonical source envelope with payload bytes
-/// carried by the separate streaming `content` part.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UploadMetadata {
-    pub api_version: u32,
-    pub source_kind: String,
-    pub classification: Classification,
-    pub media_type: String,
-    pub scope: String,
-    pub occurred: Option<TemporalRange>,
-    pub observed_at: Option<DateTime<Utc>>,
-    pub actor: Option<String>,
-    pub invocation_id: Option<String>,
-    pub idempotency_key: Option<String>,
-    #[serde(default)]
-    pub parent_sources: Vec<Uuid>,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
-}
-
-impl UploadMetadata {
-    pub fn into_material(self, content: MaterialContent) -> IngestMaterial {
-        IngestMaterial {
-            api_version: self.api_version,
-            source_kind: self.source_kind,
-            classification: self.classification,
-            media_type: self.media_type,
-            scope: self.scope,
-            occurred: self.occurred,
-            observed_at: self.observed_at,
-            actor: self.actor,
-            invocation_id: self.invocation_id,
-            idempotency_key: self.idempotency_key,
-            parent_sources: self.parent_sources,
-            metadata: self.metadata,
-            content,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcceptedMaterial {
-    pub api_version: u32,
-    pub source_id: Uuid,
-    pub artifact_id: Uuid,
-    pub obligation_id: Option<Uuid>,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolObservation {
-    pub api_version: u32,
-    pub tool_identity: String,
-    pub operation: String,
-    pub invocation_id: String,
-    pub arguments_ref_or_redacted_metadata: serde_json::Value,
-    pub result: MaterialContent,
-    pub media_type: String,
-    pub outcome: ToolOutcome,
-    pub invoked_at: Option<DateTime<Utc>>,
-    pub observed_at: Option<DateTime<Utc>>,
-    pub scope: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ToolOutcome {
-    Success,
-    Partial,
-    Error,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmitDerivation {
-    pub api_version: u32,
-    pub input_artifacts: Vec<Uuid>,
-    pub processor: ProcessorProvenance,
-    pub classification: Classification,
-    pub media_type: String,
-    pub content: MaterialContent,
-}
+use super::support::*;
+use super::*;
 
 impl LocalRuntime {
+    pub async fn observe(&self, input: ObservationInput) -> Result<AcceptedObservation> {
+        self.require_subject(input.subject).await?;
+        if let Some(session) = input.session {
+            self.require_session(input.subject, session).await?;
+        }
+        let now = Utc::now();
+        let object_guard = if matches!(
+            &input.material,
+            ObservationMaterial::InlineText { .. } | ObservationMaterial::StructuredJson { .. }
+        ) {
+            Some(self.objects.reference_guard(false).await?)
+        } else {
+            None
+        };
+        let (artifact, _) = self
+            .material_to_artifact(input.subject, &input.material, now)
+            .await?;
+        if let Some(artifact) = &artifact {
+            artifact.validate()?;
+        }
+        let occurrence_id = OccurrenceId::new();
+        let mut occurrence = ObservationOccurrence {
+            occurrence_id,
+            subject_id: input.subject,
+            artifact_id: artifact.as_ref().map(|artifact| artifact.artifact_id),
+            source_class: input.occurrence.source_class.clone(),
+            external_object_ref: input.occurrence.external_object_ref.clone().or_else(|| {
+                match &input.material {
+                    ObservationMaterial::ExternalObjectRef { object_ref } => {
+                        Some(object_ref.clone())
+                    }
+                    _ => None,
+                }
+            }),
+            occurred_at: input.occurrence.occurred_at,
+            observed_at: input.occurrence.observed_at,
+            conversation_ref: input.occurrence.conversation_ref.clone(),
+            actor_entity_ref: input.occurrence.actor_entity_ref.clone(),
+            context: input.occurrence.context.clone(),
+            created_at: now,
+        };
+        occurrence.validate()?;
+        if let Some(entity) = &occurrence.actor_entity_ref {
+            EntityRef::new(entity.as_str())?;
+        }
+        if let Some(object) = &occurrence.external_object_ref {
+            ObjectRef::new(object.as_str())?;
+        }
+        let mut tx = self.store.begin().await?;
+        let artifact = if let Some(mut artifact) = artifact {
+            let existing = sqlx::query("SELECT artifact_id,byte_length,storage_key,created_at,metadata FROM artifacts WHERE subject_id=$1 AND content_hash=$2")
+                .bind(input.subject.0).bind(&artifact.content_hash).fetch_optional(&mut *tx).await.map_err(db)?;
+            if let Some(row) = existing {
+                artifact.artifact_id = ArtifactId(row.try_get("artifact_id").map_err(db)?);
+                artifact.byte_length = row.try_get::<i64, _>("byte_length").map_err(db)? as u64;
+                artifact.storage_key = row.try_get("storage_key").map_err(db)?;
+                artifact.created_at = row.try_get("created_at").map_err(db)?;
+                artifact.metadata = row.try_get("metadata").map_err(db)?;
+            } else {
+                sqlx::query("INSERT INTO artifacts(artifact_id,subject_id,content_hash,byte_length,media_type,storage_key,created_at,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+                    .bind(artifact.artifact_id.0).bind(artifact.subject_id.0).bind(&artifact.content_hash).bind(artifact.byte_length as i64).bind(&artifact.media_type).bind(&artifact.storage_key).bind(artifact.created_at).bind(&artifact.metadata).execute(&mut *tx).await.map_err(db)?;
+            }
+            Some(artifact)
+        } else {
+            None
+        };
+        occurrence.artifact_id = artifact.as_ref().map(|artifact| artifact.artifact_id);
+        sqlx::query("INSERT INTO observation_occurrences(occurrence_id,subject_id,artifact_id,source_class,external_object_ref,occurred_at,observed_at,conversation_ref,actor_entity_ref,context,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+            .bind(occurrence.occurrence_id.0).bind(occurrence.subject_id.0).bind(occurrence.artifact_id.map(|id| id.0)).bind(occurrence.source_class.as_str()).bind(occurrence.external_object_ref.as_ref().map(ObjectRef::as_str)).bind(occurrence.occurred_at).bind(occurrence.observed_at).bind(&occurrence.conversation_ref).bind(occurrence.actor_entity_ref.as_ref().map(EntityRef::as_str)).bind(&occurrence.context).bind(occurrence.created_at).execute(&mut *tx).await.map_err(db)?;
+        let source_region = if let Some(artifact) = &artifact {
+            let coordinate = serde_json::json!({});
+            let coordinate_hash = blake3::hash(
+                serde_json::to_string(&coordinate)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            )
+            .to_hex()
+            .to_string();
+            let existing = sqlx::query("SELECT source_region_id,created_at FROM source_regions WHERE subject_id=$1 AND artifact_id=$2 AND coordinate_kind='whole_artifact' AND coordinate_hash=$3")
+                .bind(input.subject.0).bind(artifact.artifact_id.0).bind(&coordinate_hash).fetch_optional(&mut *tx).await.map_err(db)?;
+            let (id, region_created_at) = if let Some(row) = existing {
+                (
+                    SourceRegionId(row.try_get("source_region_id").map_err(db)?),
+                    row.try_get("created_at").map_err(db)?,
+                )
+            } else {
+                let id = SourceRegionId::new();
+                sqlx::query("INSERT INTO source_regions(source_region_id,subject_id,artifact_id,coordinate_kind,coordinate,coordinate_hash,created_at) VALUES($1,$2,$3,'whole_artifact',$4,$5,$6)")
+                    .bind(id.0).bind(input.subject.0).bind(artifact.artifact_id.0).bind(&coordinate).bind(&coordinate_hash).bind(now).execute(&mut *tx).await.map_err(db)?;
+                (id, now)
+            };
+            let region = SourceRegion {
+                source_region_id: id,
+                subject_id: input.subject,
+                artifact_id: artifact.artifact_id,
+                coordinate_kind: "whole_artifact".into(),
+                coordinate,
+                coordinate_hash,
+                parent_source_region_id: None,
+                created_at: region_created_at,
+            };
+            region.validate()?;
+            Some(region)
+        } else {
+            None
+        };
+        let mut mention_ids = Vec::new();
+        for mention in &input.entities {
+            if mention.surface.trim().is_empty() {
+                return Err(Error::Invalid("entity mention surface is required".into()));
+            }
+            if let Some(entity) = &mention.entity_ref {
+                EntityRef::new(entity.as_str())?;
+            }
+            let mention_id = Uuid::now_v7();
+            mention_ids.push(mention_id);
+            sqlx::query("INSERT INTO entity_mentions(mention_id,subject_id,occurrence_id,surface,semantic_role,created_at) VALUES($1,$2,$3,$4,$5,$6)")
+                .bind(mention_id).bind(input.subject.0).bind(occurrence_id.0).bind(&mention.surface).bind(&mention.semantic_role).bind(now).execute(&mut *tx).await.map_err(db)?;
+            sqlx::query("INSERT INTO entity_binding_revisions(binding_revision_id,mention_id,revision_no,entity_ref,binding_state,created_at) VALUES($1,$2,1,$3,$4,$5)")
+                .bind(Uuid::now_v7()).bind(mention_id).bind(mention.entity_ref.as_ref().map(EntityRef::as_str)).bind(if mention.entity_ref.is_some(){"bound"}else{"unbound"}).bind(now).execute(&mut *tx).await.map_err(db)?;
+        }
+        if let Some(region) = &source_region {
+            sqlx::query("INSERT INTO coverage_needs(coverage_need_id,subject_id,source_region_id,representation_kind,capability_operation,requirement,state,updated_at) VALUES($1,$2,$3,'extracted_text','document_extraction','preferred',$4,$5) ON CONFLICT(subject_id,source_region_id,representation_kind,capability_operation) DO UPDATE SET updated_at=excluded.updated_at")
+                .bind(Uuid::now_v7()).bind(input.subject.0).bind(region.source_region_id.0).bind(if matches!(input.material, ObservationMaterial::InlineText{..}){"ready"}else{"missing"}).bind(now).execute(&mut *tx).await.map_err(db)?;
+        }
+        tx.commit().await.map_err(db)?;
+        drop(object_guard);
+        let mut memory_revisions = Vec::new();
+        if matches!(input.formation, FormationDirective::ExplicitSpecific) {
+            let text = match &input.material {
+                ObservationMaterial::InlineText { text, .. } => text.clone(),
+                _ => {
+                    return Err(Error::Invalid(
+                        "explicit formation requires inline text or a supplied representation"
+                            .into(),
+                    ));
+                }
+            };
+            let evidence = vec![MemoryRevisionEvidence {
+                evidence_no: 0,
+                evidence: EvidenceRef::Occurrence { occurrence_id },
+                support_role: SupportRole::Direct,
+                weight: Some(1.0),
+            }];
+            let view = self
+                .form_memory(ExplicitMemoryInput {
+                    subject: input.subject,
+                    memory_class: MemoryClass::Specific,
+                    semantic_role: "episode".into(),
+                    representation_text: text,
+                    title: None,
+                    evidence,
+                    entity_refs: input
+                        .entities
+                        .iter()
+                        .filter_map(|mention| mention.entity_ref.clone())
+                        .collect(),
+                    tags: Vec::new(),
+                    occurred_at: input.occurrence.occurred_at,
+                    observed_at: input.occurrence.observed_at,
+                    valid_from: None,
+                    valid_to: None,
+                    epistemic_class: EpistemicClass::Reported,
+                    confidence: None,
+                })
+                .await?;
+            memory_revisions.push(view.revision.memory_revision_id);
+        } else if matches!(input.formation, FormationDirective::ConsiderSpecific)
+            && let Some(provider) = &self.memory_formation_provider
+        {
+            let text = match &input.material {
+                ObservationMaterial::InlineText { text, .. } => Some(text.clone()),
+                ObservationMaterial::ArtifactRef { artifact_id } => {
+                    let artifact = self.artifact(input.subject, *artifact_id).await?;
+                    self.objects
+                        .get(&artifact.content_hash)
+                        .await
+                        .ok()
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                }
+                _ => None,
+            };
+            if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
+                let proposals = provider
+                    .propose(MemoryFormationRequest {
+                        subject: input.subject,
+                        occurrence: occurrence_id,
+                        source_class: input.occurrence.source_class.clone(),
+                        text,
+                        entity_refs: input
+                            .entities
+                            .iter()
+                            .filter_map(|mention| mention.entity_ref.clone())
+                            .collect(),
+                        occurred_at: input.occurrence.occurred_at,
+                        observed_at: input.occurrence.observed_at,
+                    })
+                    .await?;
+                if proposals.len() > 32 {
+                    return Err(Error::Invalid(
+                        "memory formation proposal count exceeds the request bound".into(),
+                    ));
+                }
+                let allowed_entities = input
+                    .entities
+                    .iter()
+                    .filter_map(|mention| mention.entity_ref.clone())
+                    .collect::<Vec<_>>();
+                let mut proposal_keys = HashSet::new();
+                for proposal in proposals {
+                    let normalized = proposal
+                        .representation_text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .to_lowercase();
+                    let evidence_key = serde_json::to_string(&proposal.evidence)
+                        .map_err(|error| Error::Invalid(error.to_string()))?;
+                    if !proposal_keys.insert(format!("{normalized}\0{evidence_key}")) {
+                        continue;
+                    }
+                    let view = self
+                        .commit_formation_proposal(input.subject, proposal, &allowed_entities)
+                        .await?;
+                    memory_revisions.push(view.revision.memory_revision_id);
+                }
+            }
+        }
+        if let Some(session) = input.session.filter(|_| input.runtime.admit) {
+            self.admit(
+                session,
+                CognitiveRef::Occurrence(occurrence_id),
+                "observed",
+                input.runtime.hold_until,
+            )
+            .await?;
+            for mention in &input.entities {
+                if let Some(entity) = &mention.entity_ref {
+                    self.admit(
+                        session,
+                        CognitiveRef::Entity(entity.clone()),
+                        "observed",
+                        input.runtime.hold_until,
+                    )
+                    .await?;
+                }
+            }
+            if let ObservationMaterial::ResourceAvailability { resource } = &input.material {
+                ResourceRef::new(resource.as_str())?;
+                self.admit(
+                    session,
+                    CognitiveRef::Resource(resource.clone()),
+                    "resource_awareness",
+                    input.runtime.hold_until,
+                )
+                .await?;
+            }
+            for revision in &memory_revisions {
+                self.admit(
+                    session,
+                    CognitiveRef::MemoryRevision(*revision),
+                    "observed",
+                    input.runtime.hold_until,
+                )
+                .await?;
+            }
+            self.evict_if_needed(session).await?;
+        }
+        Ok(AcceptedObservation {
+            artifact,
+            occurrence,
+            source_region,
+            mention_ids,
+            resident: input.session.is_some() && input.runtime.admit,
+            memory_revisions,
+        })
+    }
+
+    async fn material_to_artifact(
+        &self,
+        subject: SubjectId,
+        material: &ObservationMaterial,
+        now: DateTime<Utc>,
+    ) -> Result<(Option<Artifact>, Option<Vec<u8>>)> {
+        match material {
+            ObservationMaterial::InlineText { text, media_type } => {
+                let bytes = text.as_bytes().to_vec();
+                self.bytes_to_artifact(subject, bytes, media_type, serde_json::json!({}), now)
+                    .await
+            }
+            ObservationMaterial::StructuredJson { value } => {
+                let bytes =
+                    serde_json::to_vec(value).map_err(|error| Error::Invalid(error.to_string()))?;
+                self.bytes_to_artifact(
+                    subject,
+                    bytes,
+                    "application/json",
+                    serde_json::json!({}),
+                    now,
+                )
+                .await
+            }
+            ObservationMaterial::ArtifactRef { artifact_id } => {
+                let artifact = self.artifact(subject, *artifact_id).await?;
+                Ok((Some(artifact), None))
+            }
+            ObservationMaterial::ExternalObjectRef { .. }
+            | ObservationMaterial::ResourceAvailability { .. } => Ok((None, None)),
+        }
+    }
+
+    async fn bytes_to_artifact(
+        &self,
+        subject: SubjectId,
+        bytes: Vec<u8>,
+        media_type: &str,
+        metadata: serde_json::Value,
+        now: DateTime<Utc>,
+    ) -> Result<(Option<Artifact>, Option<Vec<u8>>)> {
+        if bytes.len() as u64 > self.max_upload_bytes {
+            return Err(Error::Invalid(
+                "material exceeds configured byte bound".into(),
+            ));
+        }
+        let (hash, size) = self
+            .objects
+            .put_chunks(
+                futures::stream::iter([Ok::<Vec<u8>, Error>(bytes.clone())]),
+                self.max_upload_bytes,
+            )
+            .await?;
+        let artifact = Artifact {
+            artifact_id: ArtifactId::new(),
+            subject_id: subject,
+            content_hash: hash.clone(),
+            byte_length: size,
+            media_type: media_type.to_owned(),
+            storage_key: hash,
+            created_at: now,
+            metadata,
+        };
+        Ok((Some(artifact), Some(bytes)))
+    }
+
     pub async fn ingest_stream<S>(
         &self,
         subject: SubjectId,
-        input: UploadMetadata,
+        metadata: UploadMetadata,
         chunks: S,
-    ) -> Result<AcceptedMaterial>
+    ) -> Result<AcceptedObservation>
     where
-        S: Stream<Item = Result<Vec<u8>>>,
+        S: Stream<Item = Result<Vec<u8>>> + Send,
     {
-        let _objects = self.objects.reference_guard(false).await?;
-        check_version(input.api_version)?;
-        self.subject(subject).await?;
-        validate_upload_metadata(&input)?;
-        if let Some(key) = &input.idempotency_key
-            && let Some(source) = sqlx::query_scalar::<_, Uuid>(
-                "SELECT source_id FROM source_records WHERE subject_id=$1 AND idempotency_key=$2",
-            )
-            .bind(subject.0)
-            .bind(key)
-            .fetch_optional(self.store.pool())
-            .await
-            .map_err(db)?
-        {
-            return self.material_status(subject, source).await;
-        }
+        self.require_subject(subject).await?;
+        let guard = self.objects.reference_guard(false).await?;
         let (hash, size) = self
             .objects
             .put_chunks(chunks, self.max_upload_bytes)
             .await?;
-        let prepared = PreparedArtifact::New {
-            id: Uuid::now_v7(),
-            hash,
-            size: i64::try_from(size)
-                .map_err(|_| Error::Invalid("upload size exceeds database range".into()))?,
-            media_type: input.media_type.clone(),
-        };
-        let mut tx = self.store.pool().begin().await.map_err(db)?;
-        let memory_enabled: bool = sqlx::query_scalar(
-            "SELECT memory_enabled FROM subjects WHERE subject_id=$1 FOR UPDATE",
+        let now = Utc::now();
+        if !self.store.subject_exists(subject).await? {
+            drop(guard);
+            return Err(Error::NotFound("subject not found".into()));
+        }
+        let proposed_artifact_id = ArtifactId::new();
+        sqlx::query("INSERT INTO artifacts(artifact_id,subject_id,content_hash,byte_length,media_type,storage_key,created_at,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(subject_id,content_hash) DO NOTHING")
+            .bind(proposed_artifact_id.0).bind(subject.0).bind(&hash).bind(size as i64).bind(&metadata.media_type).bind(&hash).bind(now).bind(&metadata.metadata)
+            .execute(self.store.pool()).await.map_err(db)?;
+        let artifact_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT artifact_id FROM artifacts WHERE subject_id=$1 AND content_hash=$2",
         )
         .bind(subject.0)
-        .fetch_one(&mut *tx)
+        .bind(&hash)
+        .fetch_one(self.store.pool())
         .await
         .map_err(db)?;
-        if let Some(key) = &input.idempotency_key
-            && let Some(source) = sqlx::query_scalar::<_, Uuid>(
-                "SELECT source_id FROM source_records WHERE subject_id=$1 AND idempotency_key=$2",
-            )
-            .bind(subject.0)
-            .bind(key)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db)?
-        {
-            tx.rollback().await.map_err(db)?;
-            return self.material_status(subject, source).await;
-        }
-        let source = Uuid::now_v7();
-        insert_source_record(&mut tx, subject, &input, source).await?;
-        let artifact = write_artifact(&mut tx, subject, prepared, &input.classification).await?;
-        sqlx::query(
-            "INSERT INTO artifact_sources(subject_id,artifact_id,source_id) VALUES($1,$2,$3)",
-        )
-        .bind(subject.0)
-        .bind(artifact)
-        .bind(source)
-        .execute(&mut *tx)
-        .await
-        .map_err(db)?;
-        if self.memory_capability && memory_enabled {
-            sqlx::query("INSERT INTO processing_obligations(obligation_id,subject_id,kind,payload_version,source_id,payload) VALUES($1,$2,'ingest',1,$3,'{}')")
-                .bind(Uuid::now_v7()).bind(subject.0).bind(source).execute(&mut *tx).await.map_err(db)?;
-            sqlx::query("SELECT pg_notify('nous_memory_processing', '')")
-                .execute(&mut *tx)
-                .await
-                .map_err(db)?;
-        }
-        tx.commit().await.map_err(db)?;
-        self.material_status(subject, source).await
+        let artifact = self.artifact(subject, ArtifactId(artifact_id)).await?;
+        let observed_at = metadata.observed_at;
+        let result = self
+            .observe(ObservationInput {
+                subject,
+                session: None,
+                occurrence: OccurrenceDescriptor {
+                    source_class: metadata.source_class,
+                    external_object_ref: metadata.external_object_ref,
+                    occurred_at: metadata.occurred_at,
+                    observed_at,
+                    conversation_ref: metadata.conversation_ref,
+                    actor_entity_ref: metadata.actor_entity_ref,
+                    context: serde_json::json!({}),
+                },
+                material: ObservationMaterial::ArtifactRef {
+                    artifact_id: artifact.artifact_id,
+                },
+                entities: Vec::new(),
+                formation: FormationDirective::None,
+                runtime: RuntimeDirective::default(),
+            })
+            .await;
+        drop(guard);
+        result
     }
 
-    pub async fn submit_derivation(
-        &self,
-        subject: SubjectId,
-        input: SubmitDerivation,
-    ) -> Result<Derivation> {
-        let _objects = self.objects.reference_guard(false).await?;
-        check_version(input.api_version)?;
-        input.classification.validate()?;
-        if input.input_artifacts.is_empty()
-            || input.input_artifacts.len() > 1000
-            || input.processor.identity.is_empty()
-            || input.processor.revision.is_empty()
-            || input.processor.preprocessing.is_empty()
-            || input.processor.config_digest.is_empty()
-        {
-            return Err(Error::Invalid(
-                "derivation needs bounded input refs and complete processor provenance".into(),
-            ));
-        }
-        if !matches!(
-            input.classification.epistemic,
-            EpistemicClass::Derived
-                | EpistemicClass::Inferred
-                | EpistemicClass::Narrative
-                | EpistemicClass::Simulated
-        ) {
-            return Err(Error::Invalid("a processor output cannot be classified as directly observed or reported source evidence".into()));
-        }
-        if matches!(input.content, MaterialContent::Artifact { .. }) {
-            return Err(Error::Invalid(
-                "submit new derived content; an existing artifact is immutable".into(),
-            ));
-        }
-        for artifact in &input.input_artifacts {
-            self.artifact(subject, *artifact).await?;
-        }
-        let prepared = self
-            .prepare_artifact(subject, &input.media_type, &input.content)
-            .await?;
-        let mut tx = self.store.pool().begin().await.map_err(db)?;
-        sqlx::query("SELECT subject_id FROM subjects WHERE subject_id=$1 FOR UPDATE")
-            .bind(subject.0)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(db)?;
-        let output = write_artifact(&mut tx, subject, prepared, &input.classification).await?;
-        let id = Uuid::now_v7();
-        let created: DateTime<Utc> = sqlx::query_scalar("INSERT INTO derivations(derivation_id,subject_id,processor_identity,processor_revision,preprocessing_identity,config_digest) VALUES($1,$2,$3,$4,$5,$6) RETURNING created_at")
-            .bind(id).bind(subject.0).bind(&input.processor.identity).bind(&input.processor.revision).bind(&input.processor.preprocessing).bind(&input.processor.config_digest)
-            .fetch_one(&mut *tx).await.map_err(db)?;
-        for artifact in &input.input_artifacts {
-            sqlx::query("INSERT INTO derivation_inputs(subject_id,derivation_id,artifact_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
-                .bind(subject.0).bind(id).bind(artifact).execute(&mut *tx).await.map_err(db)?;
-        }
-        sqlx::query(
-            "INSERT INTO derivation_outputs(subject_id,derivation_id,artifact_id) VALUES($1,$2,$3)",
-        )
-        .bind(subject.0)
-        .bind(id)
-        .bind(output)
-        .execute(&mut *tx)
-        .await
-        .map_err(db)?;
-        sqlx::query("INSERT INTO artifact_sources(subject_id,artifact_id,source_id) SELECT $1,$2,source_id FROM artifact_sources WHERE subject_id=$1 AND artifact_id=ANY($3) ON CONFLICT DO NOTHING")
-            .bind(subject.0).bind(output).bind(&input.input_artifacts).execute(&mut *tx).await.map_err(db)?;
-        tx.commit().await.map_err(db)?;
-        Ok(Derivation {
-            derivation_id: id,
-            subject_id: subject,
-            input_artifacts: input.input_artifacts,
-            output_artifacts: vec![output],
-            processor: input.processor,
-            created_at: created,
-        })
-    }
-
-    pub async fn ingest(
-        &self,
-        subject: SubjectId,
-        input: IngestMaterial,
-    ) -> Result<AcceptedMaterial> {
-        let _objects = self.objects.reference_guard(false).await?;
-        check_version(input.api_version)?;
-        self.subject(subject).await?;
-        input.classification.validate()?;
-        if let Some(range) = &input.occurred {
-            range.validate()?;
-        }
-        if input.source_kind.is_empty()
-            || input.source_kind.len() > 128
-            || input.scope.is_empty()
-            || input.scope.len() > 1024
-            || input.media_type.is_empty()
-            || input.media_type.len() > 256
-            || input.metadata.to_string().len() > 65536
-        {
-            return Err(Error::Invalid(
-                "invalid source kind, scope, media type or metadata size".into(),
-            ));
-        }
-        if input
-            .idempotency_key
-            .as_ref()
-            .is_some_and(|key| key.is_empty() || key.len() > 1024)
-        {
-            return Err(Error::Invalid("invalid idempotency key".into()));
-        }
-        // Retry identity belongs to the subject, not the content hash.
-        if let Some(key) = &input.idempotency_key
-            && let Some(source) = sqlx::query_scalar::<_, Uuid>(
-                "SELECT source_id FROM source_records WHERE subject_id=$1 AND idempotency_key=$2",
-            )
-            .bind(subject.0)
-            .bind(key)
-            .fetch_optional(self.store.pool())
-            .await
-            .map_err(db)?
-        {
-            return self.material_status(subject, source).await;
-        }
-        let prepared = self
-            .prepare_artifact(subject, &input.media_type, &input.content)
-            .await?;
-        let mut tx = self.store.pool().begin().await.map_err(db)?;
-        // A row lock fences purge against late ingest commits for this subject.
-        let memory_enabled: bool = sqlx::query_scalar(
-            "SELECT memory_enabled FROM subjects WHERE subject_id=$1 FOR UPDATE",
-        )
-        .bind(subject.0)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(db)?;
-        if let Some(key) = &input.idempotency_key
-            && let Some(source) = sqlx::query_scalar::<_, Uuid>(
-                "SELECT source_id FROM source_records WHERE subject_id=$1 AND idempotency_key=$2",
-            )
-            .bind(subject.0)
-            .bind(key)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db)?
-        {
-            tx.rollback().await.map_err(db)?;
-            return self.material_status(subject, source).await;
-        }
-        let source = Uuid::now_v7();
-        let start = input.occurred.as_ref().and_then(|range| range.start);
-        let end = input.occurred.as_ref().and_then(|range| range.end);
-        sqlx::query("INSERT INTO source_records(source_id,subject_id,source_kind,origin_class,semantic_class,epistemic_class,scope,occurred,approximate_time,observed_at,actor,invocation_id,idempotency_key,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $8 THEN tstzrange($9,$10,'[]') ELSE NULL END,$11,$12,$13,$14,$15,$16)")
-            .bind(source).bind(subject.0).bind(&input.source_kind).bind(enum_name(&input.classification.origin)?).bind(&input.classification.semantic)
-            .bind(enum_name(&input.classification.epistemic)?).bind(&input.scope).bind(input.occurred.is_some()).bind(start).bind(end)
-            .bind(input.occurred.as_ref().is_some_and(|range| range.approximate)).bind(input.observed_at).bind(input.actor).bind(input.invocation_id)
-            .bind(input.idempotency_key).bind(input.metadata).execute(&mut *tx).await.map_err(db)?;
-        for parent in input.parent_sources {
-            sqlx::query("INSERT INTO source_parents(subject_id,source_id,parent_source_id) VALUES($1,$2,$3)")
-                .bind(subject.0).bind(source).bind(parent).execute(&mut *tx).await.map_err(db)?;
-        }
-        let artifact = write_artifact(&mut tx, subject, prepared, &input.classification).await?;
-        sqlx::query(
-            "INSERT INTO artifact_sources(subject_id,artifact_id,source_id) VALUES($1,$2,$3)",
-        )
-        .bind(subject.0)
-        .bind(artifact)
-        .bind(source)
-        .execute(&mut *tx)
-        .await
-        .map_err(db)?;
-        if self.memory_capability && memory_enabled {
-            sqlx::query("INSERT INTO processing_obligations(obligation_id,subject_id,kind,payload_version,source_id,payload) VALUES($1,$2,'ingest',1,$3,'{}')")
-                .bind(Uuid::now_v7()).bind(subject.0).bind(source).execute(&mut *tx).await.map_err(db)?;
-            sqlx::query("SELECT pg_notify('nous_memory_processing', '')")
-                .execute(&mut *tx)
-                .await
-                .map_err(db)?;
-        }
-        tx.commit().await.map_err(db)?;
-        self.material_status(subject, source).await
-    }
-
-    pub async fn material_status(
-        &self,
-        subject: SubjectId,
-        source: Uuid,
-    ) -> Result<AcceptedMaterial> {
-        let row = sqlx::query("SELECT s.source_id,a.artifact_id,o.obligation_id,o.state FROM source_records s JOIN artifact_sources a USING(subject_id,source_id) LEFT JOIN processing_obligations o ON o.subject_id=s.subject_id AND o.source_id=s.source_id AND o.kind='ingest' WHERE s.subject_id=$1 AND s.source_id=$2 ORDER BY a.artifact_id LIMIT 1")
-            .bind(subject.0).bind(source).fetch_optional(self.store.pool()).await.map_err(db)?
-            .ok_or_else(|| Error::NotFound("source not found".into()))?;
-        let state: Option<String> = row.try_get("state").map_err(db)?;
-        Ok(AcceptedMaterial {
-            api_version: 1,
-            source_id: source,
-            artifact_id: row.try_get("artifact_id").map_err(db)?,
-            obligation_id: row.try_get("obligation_id").map_err(db)?,
-            status: match state.as_deref() {
-                Some("succeeded") => "ready",
-                Some("running") => "processing",
-                Some("failed") => "failed",
-                Some(_) => "degraded",
-                None => "recorded",
-            }
-            .into(),
-        })
-    }
-
-    pub async fn record_tool_observation(
-        &self,
-        subject: SubjectId,
-        input: ToolObservation,
-    ) -> Result<AcceptedMaterial> {
-        if input.tool_identity.is_empty()
-            || input.operation.is_empty()
-            || input.invocation_id.is_empty()
-        {
-            return Err(Error::Invalid(
-                "tool, operation and invocation identities are required".into(),
-            ));
-        }
-        self.ingest(subject, IngestMaterial {
-            api_version: input.api_version, source_kind: "tool:observation".into(),
-            classification: Classification { origin: OriginClass::Tool, semantic: "TOOL_OBSERVATION".into(), epistemic: EpistemicClass::Reported },
-            media_type: input.media_type, scope: input.scope, occurred: None, observed_at: input.observed_at,
-            actor: Some(input.tool_identity.clone()), invocation_id: Some(input.invocation_id.clone()),
-            idempotency_key: Some(format!("tool:{}:{}:{}", input.tool_identity, input.operation, input.invocation_id)), parent_sources: vec![],
-            metadata: serde_json::json!({"tool": input.tool_identity, "operation": input.operation, "outcome": input.outcome,
-                "invoked_at": input.invoked_at, "arguments_ref_or_redacted_metadata": input.arguments_ref_or_redacted_metadata}), content: input.result,
-        }).await
-    }
-
-    pub async fn artifact(&self, subject: SubjectId, artifact: Uuid) -> Result<Artifact> {
-        let row = sqlx::query("SELECT * FROM artifacts WHERE subject_id=$1 AND artifact_id=$2")
-            .bind(subject.0)
-            .bind(artifact)
-            .fetch_optional(self.store.pool())
-            .await
-            .map_err(db)?
-            .ok_or_else(|| Error::NotFound("artifact not found".into()))?;
-        let sources = sqlx::query_scalar("SELECT source_id FROM artifact_sources WHERE subject_id=$1 AND artifact_id=$2 ORDER BY source_id")
-            .bind(subject.0).bind(artifact).fetch_all(self.store.pool()).await.map_err(db)?;
+    pub async fn artifact(&self, subject: SubjectId, artifact: ArtifactId) -> Result<Artifact> {
+        let row = sqlx::query("SELECT artifact_id,subject_id,content_hash,byte_length,media_type,storage_key,created_at,metadata FROM artifacts WHERE subject_id=$1 AND artifact_id=$2")
+            .bind(subject.0).bind(artifact.0).fetch_optional(self.store.pool()).await.map_err(db)?.ok_or_else(||Error::NotFound("artifact not found".into()))?;
         Ok(Artifact {
-            artifact_id: artifact,
-            subject_id: subject,
+            artifact_id: ArtifactId(row.try_get("artifact_id").map_err(db)?),
+            subject_id: SubjectId(row.try_get("subject_id").map_err(db)?),
             content_hash: row.try_get("content_hash").map_err(db)?,
+            byte_length: row.try_get::<i64, _>("byte_length").map_err(db)? as u64,
             media_type: row.try_get("media_type").map_err(db)?,
-            byte_size: row.try_get("byte_size").map_err(db)?,
-            classification: Classification {
-                origin: decode_enum(row.try_get("origin_class").map_err(db)?)?,
-                semantic: row.try_get("semantic_class").map_err(db)?,
-                epistemic: decode_enum(row.try_get("epistemic_class").map_err(db)?)?,
-            },
-            source_refs: sources,
+            storage_key: row.try_get("storage_key").map_err(db)?,
             created_at: row.try_get("created_at").map_err(db)?,
+            metadata: row.try_get("metadata").map_err(db)?,
         })
-    }
-
-    pub async fn source_show(&self, subject: SubjectId, source: Uuid) -> Result<serde_json::Value> {
-        let row = sqlx::query("SELECT * FROM source_records WHERE subject_id=$1 AND source_id=$2")
-            .bind(subject.0)
-            .bind(source)
-            .fetch_optional(self.store.pool())
-            .await
-            .map_err(db)?
-            .ok_or_else(|| Error::NotFound("source not found".into()))?;
-        let parents: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT parent_source_id FROM source_parents WHERE subject_id=$1 AND source_id=$2 ORDER BY parent_source_id",
-        )
-        .bind(subject.0)
-        .bind(source)
-        .fetch_all(self.store.pool())
-        .await
-        .map_err(db)?;
-        let artifacts: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT artifact_id FROM artifact_sources WHERE subject_id=$1 AND source_id=$2 ORDER BY artifact_id",
-        )
-        .bind(subject.0)
-        .bind(source)
-        .fetch_all(self.store.pool())
-        .await
-        .map_err(db)?;
-        Ok(serde_json::json!({
-            "api_version": 1,
-            "source_id": source,
-            "source_kind": row.try_get::<String, _>("source_kind").map_err(db)?,
-            "origin": row.try_get::<String, _>("origin_class").map_err(db)?,
-            "semantic": row.try_get::<String, _>("semantic_class").map_err(db)?,
-            "epistemic": row.try_get::<String, _>("epistemic_class").map_err(db)?,
-            "scope": row.try_get::<String, _>("scope").map_err(db)?,
-            "recorded_at": row.try_get::<DateTime<Utc>, _>("recorded_at").map_err(db)?,
-            "observed_at": row.try_get::<Option<DateTime<Utc>>, _>("observed_at").map_err(db)?,
-            "actor": row.try_get::<Option<String>, _>("actor").map_err(db)?,
-            "invocation_id": row.try_get::<Option<String>, _>("invocation_id").map_err(db)?,
-            "metadata": row.try_get::<serde_json::Value, _>("metadata").map_err(db)?,
-            "parent_sources": parents,
-            "artifact_ids": artifacts,
-        }))
-    }
-
-    pub async fn artifact_lineage(
-        &self,
-        subject: SubjectId,
-        artifact: Uuid,
-    ) -> Result<serde_json::Value> {
-        self.artifact(subject, artifact).await?;
-        let inputs: Vec<(Uuid, Vec<Uuid>)> = sqlx::query(
-            "SELECT d.derivation_id, array_agg(i.artifact_id ORDER BY i.artifact_id) AS inputs FROM derivation_outputs o JOIN derivations d USING(subject_id,derivation_id) JOIN derivation_inputs i USING(subject_id,derivation_id) WHERE o.subject_id=$1 AND o.artifact_id=$2 GROUP BY d.derivation_id ORDER BY d.derivation_id",
-        )
-        .bind(subject.0)
-        .bind(artifact)
-        .fetch_all(self.store.pool())
-        .await
-        .map_err(db)?
-        .into_iter()
-        .map(|row| {
-            Ok((
-                row.try_get("derivation_id").map_err(db)?,
-                row.try_get("inputs").map_err(db)?,
-            ))
-        })
-        .collect::<Result<_>>()?;
-        let sources: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT source_id FROM artifact_sources WHERE subject_id=$1 AND artifact_id=$2 ORDER BY source_id",
-        )
-        .bind(subject.0)
-        .bind(artifact)
-        .fetch_all(self.store.pool())
-        .await
-        .map_err(db)?;
-        Ok(serde_json::json!({
-            "api_version": 1,
-            "artifact_id": artifact,
-            "source_ids": sources,
-            "derivations": inputs.into_iter().map(|(derivation_id, input_artifacts)| serde_json::json!({"derivation_id": derivation_id, "input_artifacts": input_artifacts})).collect::<Vec<_>>(),
-        }))
     }
 
     pub async fn artifact_stream(
         &self,
         subject: SubjectId,
-        artifact: Uuid,
+        artifact: ArtifactId,
     ) -> Result<(Artifact, impl Stream<Item = Result<Vec<u8>>> + Send + use<>)> {
-        let metadata = self.artifact(subject, artifact).await?;
-        let stream = self.objects.stream(&metadata.content_hash).await?;
-        Ok((metadata, stream))
-    }
-
-    pub async fn artifact_bytes(&self, subject: SubjectId, artifact: Uuid) -> Result<Vec<u8>> {
         let artifact = self.artifact(subject, artifact).await?;
-        let bytes = self.objects.get(&artifact.content_hash).await?;
-        if bytes.len() as i64 != artifact.byte_size
-            || blake3::hash(&bytes).to_hex().as_str() != artifact.content_hash
-        {
-            return Err(Error::Infrastructure(
-                "artifact integrity check failed".into(),
-            ));
-        }
-        Ok(bytes)
+        let stream = self.objects.stream(&artifact.content_hash).await?;
+        Ok((artifact, stream))
     }
-
-    pub(crate) async fn prepare_artifact(
-        &self,
-        subject: SubjectId,
-        media_type: &str,
-        content: &MaterialContent,
-    ) -> Result<PreparedArtifact> {
-        let bytes = match content {
-            MaterialContent::Text { text } => text.as_bytes().to_vec(),
-            MaterialContent::Json { value } => {
-                serde_json::to_vec(value).map_err(|e| Error::Invalid(e.to_string()))?
-            }
-            MaterialContent::Artifact { artifact_id } => {
-                self.artifact(subject, *artifact_id).await?;
-                return Ok(PreparedArtifact::Existing(*artifact_id));
-            }
-        };
-        if bytes.len() as u64 > self.max_upload_bytes {
-            return Err(Error::Invalid(
-                "material payload exceeds configured byte limit".into(),
-            ));
-        }
-        let size = bytes.len() as i64;
-        let hash = self.objects.put(bytes).await?;
-        Ok(PreparedArtifact::New {
-            id: Uuid::now_v7(),
-            hash,
-            size,
-            media_type: media_type.into(),
-        })
-    }
-}
-
-pub(crate) enum PreparedArtifact {
-    New {
-        id: Uuid,
-        hash: String,
-        size: i64,
-        media_type: String,
-    },
-    Existing(Uuid),
-}
-
-pub(crate) async fn write_artifact(
-    tx: &mut Transaction<'_, Postgres>,
-    subject: SubjectId,
-    prepared: PreparedArtifact,
-    classification: &Classification,
-) -> Result<Uuid> {
-    match prepared {
-        PreparedArtifact::Existing(id) => Ok(id),
-        PreparedArtifact::New {
-            id,
-            hash,
-            size,
-            media_type,
-        } => {
-            sqlx::query("INSERT INTO artifacts(artifact_id,subject_id,content_hash,media_type,byte_size,origin_class,semantic_class,epistemic_class) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
-                .bind(id).bind(subject.0).bind(hash).bind(media_type).bind(size).bind(enum_name(&classification.origin)?).bind(&classification.semantic).bind(enum_name(&classification.epistemic)?)
-                .execute(&mut **tx).await.map_err(db)?;
-            Ok(id)
-        }
-    }
-}
-
-pub(crate) fn enum_name(value: &impl Serialize) -> Result<String> {
-    serde_json::to_value(value)
-        .map_err(|e| Error::Infrastructure(e.to_string()))?
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| Error::Infrastructure("expected string enumeration".into()))
-}
-pub(crate) fn decode_enum<T: serde::de::DeserializeOwned>(value: String) -> Result<T> {
-    serde_json::from_value(serde_json::Value::String(value))
-        .map_err(|e| Error::Infrastructure(e.to_string()))
-}
-
-fn validate_upload_metadata(input: &UploadMetadata) -> Result<()> {
-    input.classification.validate()?;
-    if let Some(range) = &input.occurred {
-        range.validate()?;
-    }
-    if input.source_kind.is_empty()
-        || input.source_kind.len() > 128
-        || input.scope.is_empty()
-        || input.scope.len() > 1024
-        || input.media_type.is_empty()
-        || input.media_type.len() > 256
-        || input.metadata.to_string().len() > 65536
-        || input.parent_sources.len() > 1000
-    {
-        return Err(Error::Invalid(
-            "invalid source kind, scope, media type, parent count or metadata size".into(),
-        ));
-    }
-    if input
-        .idempotency_key
-        .as_ref()
-        .is_some_and(|key| key.is_empty() || key.len() > 1024)
-    {
-        return Err(Error::Invalid("invalid idempotency key".into()));
-    }
-    Ok(())
-}
-
-async fn insert_source_record(
-    tx: &mut Transaction<'_, Postgres>,
-    subject: SubjectId,
-    input: &UploadMetadata,
-    source: Uuid,
-) -> Result<()> {
-    let start = input.occurred.as_ref().and_then(|range| range.start);
-    let end = input.occurred.as_ref().and_then(|range| range.end);
-    sqlx::query("INSERT INTO source_records(source_id,subject_id,source_kind,origin_class,semantic_class,epistemic_class,scope,occurred,approximate_time,observed_at,actor,invocation_id,idempotency_key,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $8 THEN tstzrange($9,$10,'[]') ELSE NULL END,$11,$12,$13,$14,$15,$16)")
-        .bind(source).bind(subject.0).bind(&input.source_kind).bind(enum_name(&input.classification.origin)?).bind(&input.classification.semantic)
-        .bind(enum_name(&input.classification.epistemic)?).bind(&input.scope).bind(input.occurred.is_some()).bind(start).bind(end)
-        .bind(input.occurred.as_ref().is_some_and(|range| range.approximate)).bind(input.observed_at).bind(&input.actor).bind(&input.invocation_id)
-        .bind(&input.idempotency_key).bind(&input.metadata).execute(&mut **tx).await.map_err(db)?;
-    for parent in &input.parent_sources {
-        sqlx::query(
-            "INSERT INTO source_parents(subject_id,source_id,parent_source_id) VALUES($1,$2,$3)",
-        )
-        .bind(subject.0)
-        .bind(source)
-        .bind(parent)
-        .execute(&mut **tx)
-        .await
-        .map_err(db)?;
-    }
-    Ok(())
 }

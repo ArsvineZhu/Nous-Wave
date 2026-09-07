@@ -7,13 +7,13 @@ publish.workspace = true
 
 [dependencies]
 nous-core.workspace = true
-nous-memory-domain.workspace = true
-lancedb.workspace = true
 serde.workspace = true
 uuid.workspace = true
-tokio.workspace = true
-arrow-array.workspace = true
-arrow-schema.workspace = true
-futures.workspace = true
-blake3.workspace = true
 serde_json.workspace = true
+usearch.workspace = true
+tantivy.workspace = true
+petgraph.workspace = true
+nalgebra.workspace = true
+roaring.workspace = true
+rayon.workspace = true
+arc-swap.workspace = true

@@ -1,657 +1,500 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, Query, Request, State},
-    http::{HeaderValue, StatusCode, header},
+    extract::{Multipart, Path, State},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
-use nous_core::{Error, SubjectId};
+use futures::{StreamExt, stream};
+use nous_core::{CognitiveQuery, Error, MemoryId, SubjectId};
+use nous_material::ObservationInput;
+use nous_memory_domain::ExplicitMemoryInput;
 use nous_memory_service::{
-    LocalRuntime,
-    bundle::{ImportRequest, ImportResult},
-    cycles::UseFeedback,
-    material::{IngestMaterial, SubmitDerivation, ToolObservation, UploadMetadata},
-    memory::CorrectMemory,
-    operations::ConsolidateRequest,
-    purge::PurgeRequest,
-    recall::RecallResponse,
-    subjects::{CreateSubject, ReplaceSeed},
+    CreateSubject, LocalRuntime, ResourceUpsert, ReviseMemoryInput, UploadMetadata, UseFeedback,
 };
 use serde::Deserialize;
+use serde_json::Value;
 use uuid::Uuid;
 
 pub fn routes() -> Router<LocalRuntime> {
     Router::new()
-        .route("/v1/subjects", post(create).get(list))
-        .route("/v1/subjects/{subject}", get(show))
-        .route("/v1/subjects/{subject}/seed", post(replace))
-        .route("/v1/subjects/{subject}/seed/history", get(history))
-        .route("/v1/subjects/{subject}/material", post(ingest))
+        .route("/v1/subjects", post(create_subject))
+        .route("/v1/subjects/{subject_id}/sessions", post(open_session))
         .route(
-            "/v1/subjects/{subject}/material/upload",
-            post(upload).layer(axum::extract::DefaultBodyLimit::disable()),
+            "/v1/subjects/{subject_id}/sessions/{session_id}",
+            get(show_session),
         )
         .route(
-            "/v1/subjects/{subject}/material/{source}/status",
-            get(material_status),
+            "/v1/subjects/{subject_id}/sessions/{session_id}/close",
+            post(close_session),
         )
-        .route("/v1/subjects/{subject}/artifacts/{artifact}", get(artifact))
+        .route("/v1/subjects/{subject_id}/artifacts", post(upload_artifact))
         .route(
-            "/v1/subjects/{subject}/artifacts/{artifact}/content",
+            "/v1/subjects/{subject_id}/artifacts/{artifact_id}",
+            get(show_artifact),
+        )
+        .route(
+            "/v1/subjects/{subject_id}/artifacts/{artifact_id}/content",
             get(artifact_content),
         )
+        .route("/v1/subjects/{subject_id}/observations", post(observe))
+        .route("/v1/subjects/{subject_id}/materialize", post(materialize))
+        .route("/v1/subjects/{subject_id}/memories/form", post(form_memory))
         .route(
-            "/v1/subjects/{subject}/artifacts/{artifact}/lineage",
-            get(artifact_lineage),
-        )
-        .route("/v1/subjects/{subject}/sources/{source}", get(source_show))
-        .route("/v1/subjects/{subject}/derivations", post(derivation))
-        .route(
-            "/v1/subjects/{subject}/tool-observation",
-            post(tool_observation),
-        )
-        .route("/v1/subjects/{subject}/recall", post(recall))
-        .route("/v1/subjects/{subject}/cycles", post(begin_cycle))
-        .route(
-            "/v1/subjects/{subject}/cycles/{cycle}/inspect",
-            post(inspect_cycle),
+            "/v1/subjects/{subject_id}/memories/consolidate",
+            post(consolidate),
         )
         .route(
-            "/v1/subjects/{subject}/cycles/{cycle}/feedback",
-            post(feedback),
+            "/v1/subjects/{subject_id}/memories/{memory_id}",
+            get(show_memory).delete(purge_memory),
         )
         .route(
-            "/v1/subjects/{subject}/cycles/{cycle}/close",
-            post(close_cycle),
-        )
-        .route("/v1/subjects/{subject}/memory/{object}", get(memory))
-        .route(
-            "/v1/subjects/{subject}/memory/{object}/history",
+            "/v1/subjects/{subject_id}/memories/{memory_id}/revisions",
             get(memory_history),
         )
         .route(
-            "/v1/subjects/{subject}/memory/{object}/episode-membership",
-            get(episode_membership),
+            "/v1/subjects/{subject_id}/memories/{memory_id}/revise",
+            post(revise_memory),
         )
         .route(
-            "/v1/subjects/{subject}/memory/{object}/associations",
-            get(associations),
+            "/v1/subjects/{subject_id}/memories/{memory_id}/suppress",
+            post(suppress_memory),
         )
         .route(
-            "/v1/subjects/{subject}/memory/{object}/correct",
-            post(correct_memory),
+            "/v1/subjects/{subject_id}/memories/{memory_id}/restore",
+            post(restore_memory),
+        )
+        .route("/v1/subjects/{subject_id}/query", post(query))
+        .route("/v1/subjects/{subject_id}/use", post(use_feedback))
+        .route("/v1/subjects/{subject_id}/resources", get(list_resources))
+        .route(
+            "/v1/subjects/{subject_id}/resources/{resource_ref}",
+            put(upsert_resource).delete(delete_resource),
         )
         .route(
-            "/v1/subjects/{subject}/memory/{object}/suppress",
-            post(suppress),
-        )
-        .route(
-            "/v1/subjects/{subject}/memory/consolidate",
-            post(consolidate),
-        )
-        .route("/v1/subjects/{subject}/memory/purge", post(purge))
-        .route(
-            "/v1/subjects/{subject}/projection/rebuild",
+            "/v1/subjects/{subject_id}/projection/rebuild",
             post(rebuild_projection),
         )
-        .route("/v1/subjects/{subject}/process", post(process))
-        .route("/v1/subjects/{subject}/bundle/export", post(export_bundle))
-        .route("/v1/bundle/import", post(import_bundle))
+        .route("/v1/subjects/{subject_id}/tags", post(create_tag))
+        .route("/v1/subjects/{subject_id}/anchors", post(create_anchor))
+        .route(
+            "/v1/subjects/{subject_id}/associations",
+            post(create_association),
+        )
+        .route(
+            "/v1/subjects/{subject_id}/entity-bindings/rebind",
+            post(rebind_entity),
+        )
 }
 
-struct Problem(Error);
+#[derive(Debug, serde::Serialize)]
+struct Problem {
+    error: String,
+}
+
+type Result<T, E = Problem> = std::result::Result<T, E>;
+
 impl From<Error> for Problem {
     fn from(error: Error) -> Self {
-        Self(error)
+        Self {
+            error: error.to_string(),
+        }
     }
 }
+
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
-        let (status, code, message) = match self.0 {
-            Error::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", message),
-            Error::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
-            Error::Conflict(message) => (StatusCode::CONFLICT, "revision_conflict", message),
-            Error::Unavailable(message) => {
-                (StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
-            }
-            Error::Infrastructure(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "dependency_failure",
-                "A required dependency failed".into(),
-            ),
+        let status = if self.error.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else if self.error.contains("unavailable") {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else if self.error.contains("invalid") || self.error.contains("required") {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
         };
-        (status, Json(serde_json::json!({"api_version": 1, "code": code, "message": message, "request_id": Uuid::now_v7()}))).into_response()
+        (status, Json(self)).into_response()
     }
 }
 
-async fn create(
+async fn create_subject(
     State(runtime): State<LocalRuntime>,
     Json(input): Json<CreateSubject>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok((
-        StatusCode::CREATED,
-        Json(runtime.create_subject(input).await?),
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime.create_subject(input).await.map_err(Problem::from)?,
     ))
 }
-async fn show(
+
+async fn open_session(
     State(runtime): State<LocalRuntime>,
     Path(subject): Path<Uuid>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(runtime.subject(SubjectId(subject)).await?))
-}
-#[derive(Deserialize)]
-struct Page {
-    after: Option<Uuid>,
-    limit: Option<u32>,
-}
-async fn list(
-    State(runtime): State<LocalRuntime>,
-    Query(page): Query<Page>,
-) -> Result<impl IntoResponse, Problem> {
+    Json(metadata): Json<Value>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
         runtime
-            .subjects(page.after, page.limit.unwrap_or(100))
-            .await?,
-    ))
-}
-async fn replace(
-    State(runtime): State<LocalRuntime>,
-    Path(subject): Path<Uuid>,
-    Json(input): Json<ReplaceSeed>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(runtime.replace_seed(SubjectId(subject), input).await?))
-}
-async fn history(
-    State(runtime): State<LocalRuntime>,
-    Path(subject): Path<Uuid>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(runtime.seed_history(SubjectId(subject)).await?))
-}
-
-async fn ingest(
-    State(runtime): State<LocalRuntime>,
-    Path(subject): Path<Uuid>,
-    Json(input): Json<IngestMaterial>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(runtime.ingest(SubjectId(subject), input).await?),
+            .open_session(SubjectId(subject), metadata)
+            .await
+            .map_err(Problem::from)?,
     ))
 }
 
-async fn upload(
+async fn show_session(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, session)): Path<(Uuid, Uuid)>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime
+            .session(SubjectId(subject), nous_core::SessionId(session))
+            .await
+            .map_err(Problem::from)?,
+    ))
+}
+
+async fn close_session(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, session)): Path<(Uuid, Uuid)>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime
+            .close_session(SubjectId(subject), nous_core::SessionId(session))
+            .await
+            .map_err(Problem::from)?,
+    ))
+}
+
+async fn upload_artifact(
     State(runtime): State<LocalRuntime>,
     Path(subject): Path<Uuid>,
-    request: Request,
-) -> Result<impl IntoResponse, Problem> {
-    let content_type = request
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| Problem(Error::Invalid("multipart content type required".into())))?;
-    let boundary =
-        multer::parse_boundary(content_type).map_err(|e| Problem(Error::Invalid(e.to_string())))?;
-    let mut multipart = multer::Multipart::new(request.into_body().into_data_stream(), boundary);
-    let mut metadata = multipart
-        .next_field()
-        .await
-        .map_err(multipart_problem)?
-        .ok_or_else(|| Problem(Error::Invalid("metadata part required".into())))?;
-    if metadata.name() != Some("metadata") {
-        return Err(Problem(Error::Invalid(
-            "metadata must precede content".into(),
-        )));
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = metadata.chunk().await.map_err(multipart_problem)? {
-        if bytes.len().saturating_add(chunk.len()) > 65536 {
-            return Err(Problem(Error::Invalid("metadata exceeds 64 KiB".into())));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let input: UploadMetadata =
-        serde_json::from_slice(&bytes).map_err(|e| Problem(Error::Invalid(e.to_string())))?;
-    drop(metadata);
-    let content = multipart
-        .next_field()
-        .await
-        .map_err(multipart_problem)?
-        .ok_or_else(|| Problem(Error::Invalid("content part required".into())))?;
-    if content.name() != Some("content") {
-        return Err(Problem(Error::Invalid(
-            "exactly one content part required".into(),
-        )));
-    }
-    let stream = futures::stream::try_unfold(
-        (content, multipart),
-        |(mut content, mut multipart)| async move {
-            match content
-                .chunk()
-                .await
-                .map_err(|e| Error::Invalid(e.to_string()))?
-            {
-                Some(bytes) => Ok(Some((bytes.to_vec(), (content, multipart)))),
-                None => {
-                    drop(content);
-                    if multipart
-                        .next_field()
-                        .await
-                        .map_err(|e| Error::Invalid(e.to_string()))?
-                        .is_some()
-                    {
-                        return Err(Error::Invalid(
-                            "upload accepts only one metadata and one content part".into(),
-                        ));
-                    }
-                    Ok(None)
-                }
+    mut multipart: Multipart,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    let mut metadata = UploadMetadata {
+        media_type: "application/octet-stream".into(),
+        metadata: serde_json::json!({}),
+        source_class: nous_core::SourceClass::File,
+        external_object_ref: None,
+        occurred_at: None,
+        observed_at: chrono::Utc::now(),
+        conversation_ref: None,
+        actor_entity_ref: None,
+    };
+    let mut uploaded = None;
+    while let Some(field) = multipart.next_field().await.map_err(|error| Problem {
+        error: error.to_string(),
+    })? {
+        let name = field.name().unwrap_or_default().to_owned();
+        if name == "metadata" {
+            let value = field.bytes().await.map_err(|error| Problem {
+                error: error.to_string(),
+            })?;
+            metadata = serde_json::from_slice(&value).map_err(|error| Problem {
+                error: error.to_string(),
+            })?;
+        } else if name == "file" || name == "content" {
+            if uploaded.is_some() {
+                return Err(Problem {
+                    error: "only one file field is supported".into(),
+                });
             }
-        },
-    );
-    let accepted = runtime
-        .ingest_stream(SubjectId(subject), input, stream)
-        .await?;
-    Ok((StatusCode::ACCEPTED, Json(accepted)))
+            let chunks = stream::unfold(Some(field), |field| async move {
+                let mut field = field?;
+                match field.chunk().await {
+                    Ok(Some(chunk)) => {
+                        Some((Ok::<Vec<u8>, nous_core::Error>(chunk.to_vec()), Some(field)))
+                    }
+                    Ok(None) => None,
+                    Err(error) => Some((Err(nous_core::Error::Invalid(error.to_string())), None)),
+                }
+            });
+            uploaded = Some(
+                runtime
+                    .ingest_stream(SubjectId(subject), metadata.clone(), chunks)
+                    .await
+                    .map_err(Problem::from)?,
+            );
+        }
+    }
+    let result = uploaded.ok_or_else(|| Problem {
+        error: "file content is required".into(),
+    })?;
+    Ok(Json(result))
 }
-fn multipart_problem(error: multer::Error) -> Problem {
-    Problem(Error::Invalid(format!("invalid multipart body: {error}")))
-}
-async fn tool_observation(
-    State(runtime): State<LocalRuntime>,
-    Path(subject): Path<Uuid>,
-    Json(input): Json<ToolObservation>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(
-            runtime
-                .record_tool_observation(SubjectId(subject), input)
-                .await?,
-        ),
-    ))
-}
-async fn material_status(
-    State(runtime): State<LocalRuntime>,
-    Path((subject, source)): Path<(Uuid, Uuid)>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(
-        runtime.material_status(SubjectId(subject), source).await?,
-    ))
-}
-async fn artifact(
+
+async fn show_artifact(
     State(runtime): State<LocalRuntime>,
     Path((subject, artifact)): Path<(Uuid, Uuid)>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(runtime.artifact(SubjectId(subject), artifact).await?))
-}
-async fn source_show(
-    State(runtime): State<LocalRuntime>,
-    Path((subject, source)): Path<(Uuid, Uuid)>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(runtime.source_show(SubjectId(subject), source).await?))
-}
-async fn artifact_lineage(
-    State(runtime): State<LocalRuntime>,
-    Path((subject, artifact)): Path<(Uuid, Uuid)>,
-) -> Result<impl IntoResponse, Problem> {
+) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
         runtime
-            .artifact_lineage(SubjectId(subject), artifact)
-            .await?,
+            .artifact(SubjectId(subject), nous_core::ArtifactId(artifact))
+            .await
+            .map_err(Problem::from)?,
     ))
 }
+
 async fn artifact_content(
     State(runtime): State<LocalRuntime>,
     Path((subject, artifact)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, Problem> {
     let (metadata, stream) = runtime
-        .artifact_stream(SubjectId(subject), artifact)
-        .await?;
-    let mut response = Response::new(Body::from_stream(stream));
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_str(&metadata.media_type)
-            .map_err(|error| Problem(Error::Infrastructure(error.to_string())))?,
-    );
-    response.headers_mut().insert(
-        header::CONTENT_LENGTH,
-        HeaderValue::from_str(&metadata.byte_size.to_string())
-            .map_err(|error| Problem(Error::Infrastructure(error.to_string())))?,
-    );
-    response.headers_mut().insert(
-        header::ETAG,
-        HeaderValue::from_str(&format!("\"{}\"", metadata.content_hash))
-            .map_err(|error| Problem(Error::Infrastructure(error.to_string())))?,
-    );
+        .artifact_stream(SubjectId(subject), nous_core::ArtifactId(artifact))
+        .await
+        .map_err(Problem::from)?;
+    let stream =
+        stream.map(|chunk| chunk.map_err(|error| std::io::Error::other(error.to_string())));
+    let response = Response::builder()
+        .header(header::CONTENT_TYPE, metadata.media_type)
+        .body(Body::from_stream(stream))
+        .map_err(|error| Problem {
+            error: error.to_string(),
+        })?;
     Ok(response)
 }
-async fn derivation(
+
+async fn observe(
     State(runtime): State<LocalRuntime>,
     Path(subject): Path<Uuid>,
-    Json(input): Json<SubmitDerivation>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok((
-        StatusCode::CREATED,
-        Json(runtime.submit_derivation(SubjectId(subject), input).await?),
-    ))
+    Json(mut input): Json<ObservationInput>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    input.subject = SubjectId(subject);
+    Ok(Json(runtime.observe(input).await.map_err(Problem::from)?))
 }
-async fn recall(
+
+#[derive(Debug, Deserialize)]
+struct MaterializeRequest {
+    reference: nous_core::CognitiveRef,
+}
+
+async fn materialize(
     State(runtime): State<LocalRuntime>,
     Path(subject): Path<Uuid>,
-    Json(input): Json<serde_json::Value>,
-) -> Result<Json<RecallResponse>, Problem> {
-    Ok(Json(
-        runtime
-            .recall(SubjectId(subject), runtime.recall_input(input)?)
-            .await?,
-    ))
-}
-#[derive(Deserialize)]
-struct CycleBegin {
-    context: serde_json::Value,
-}
-async fn begin_cycle(
-    State(runtime): State<LocalRuntime>,
-    Path(subject): Path<Uuid>,
-    Json(input): Json<CycleBegin>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            serde_json::json!({"api_version":1,"cycle_id":runtime.begin_cycle(SubjectId(subject),input.context).await?}),
-        ),
-    ))
-}
-#[derive(Deserialize)]
-struct ObjectRefs {
-    object_refs: Vec<Uuid>,
-}
-async fn inspect_cycle(
-    State(runtime): State<LocalRuntime>,
-    Path((subject, cycle)): Path<(Uuid, Uuid)>,
-    Json(input): Json<ObjectRefs>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(
-        runtime
-            .inspect_cycle(SubjectId(subject), cycle, &input.object_refs)
-            .await?,
-    ))
-}
-async fn feedback(
-    State(runtime): State<LocalRuntime>,
-    Path((subject, cycle)): Path<(Uuid, Uuid)>,
-    Json(input): Json<UseFeedback>,
-) -> Result<impl IntoResponse, Problem> {
-    runtime.feedback(SubjectId(subject), cycle, input).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-#[derive(Deserialize)]
-struct CloseCycle {
-    outcome: String,
-}
-async fn close_cycle(
-    State(runtime): State<LocalRuntime>,
-    Path((subject, cycle)): Path<(Uuid, Uuid)>,
-    Json(input): Json<CloseCycle>,
-) -> Result<impl IntoResponse, Problem> {
+    Json(input): Json<MaterializeRequest>,
+) -> Result<Json<Value>, Problem> {
     runtime
-        .close_cycle(SubjectId(subject), cycle, &input.outcome)
-        .await?;
-    Ok(StatusCode::NO_CONTENT)
+        .validate_reference(SubjectId(subject), &input.reference)
+        .await
+        .map_err(Problem::from)?;
+    Ok(Json(serde_json::json!({
+        "reference": input.reference,
+        "status": "handle_only",
+        "note": "materialization is performed by the Host resolver or artifact content route"
+    })))
 }
-#[derive(Deserialize)]
-struct MemoryQuery {
-    revision: Option<Uuid>,
-}
-async fn memory(
+
+async fn form_memory(
     State(runtime): State<LocalRuntime>,
-    Path((subject, object)): Path<(Uuid, Uuid)>,
-    Query(query): Query<MemoryQuery>,
-) -> Result<impl IntoResponse, Problem> {
+    Path(subject): Path<Uuid>,
+    Json(mut input): Json<ExplicitMemoryInput>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    input.subject = SubjectId(subject);
     Ok(Json(
-        runtime
-            .memory(SubjectId(subject), object, query.revision)
-            .await?,
+        runtime.form_memory(input).await.map_err(Problem::from)?,
     ))
 }
-async fn memory_history(
-    State(runtime): State<LocalRuntime>,
-    Path((subject, object)): Path<(Uuid, Uuid)>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(
-        runtime.memory_history(SubjectId(subject), object).await?,
-    ))
-}
-async fn episode_membership(
-    State(runtime): State<LocalRuntime>,
-    Path((subject, object)): Path<(Uuid, Uuid)>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(
-        runtime
-            .episode_membership(SubjectId(subject), object)
-            .await?,
-    ))
-}
-async fn associations(
-    State(runtime): State<LocalRuntime>,
-    Path((subject, object)): Path<(Uuid, Uuid)>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(
-        runtime
-            .association_evidence(SubjectId(subject), object)
-            .await?,
-    ))
-}
-async fn correct_memory(
-    State(runtime): State<LocalRuntime>,
-    Path((subject, object)): Path<(Uuid, Uuid)>,
-    Json(input): Json<CorrectMemory>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(
-        runtime
-            .correct_memory(SubjectId(subject), object, input)
-            .await?,
-    ))
-}
-#[derive(Deserialize)]
-struct SuppressInput {
-    suppressed: bool,
-    reason: String,
-}
-async fn suppress(
-    State(runtime): State<LocalRuntime>,
-    Path((subject, object)): Path<(Uuid, Uuid)>,
-    Json(input): Json<SuppressInput>,
-) -> Result<impl IntoResponse, Problem> {
-    runtime
-        .suppress(SubjectId(subject), object, input.suppressed, &input.reason)
-        .await?;
-    Ok(StatusCode::NO_CONTENT)
-}
+
 async fn consolidate(
     State(runtime): State<LocalRuntime>,
     Path(subject): Path<Uuid>,
-    Json(input): Json<ConsolidateRequest>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(runtime.consolidate(SubjectId(subject), input).await?))
+    Json(mut input): Json<nous_memory_domain::ConsolidationRequest>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    input.subject = nous_core::SubjectId(subject);
+    Ok(Json(
+        runtime
+            .consolidate(SubjectId(subject), input)
+            .await
+            .map_err(Problem::from)?,
+    ))
 }
-async fn purge(
+
+async fn show_memory(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, memory)): Path<(Uuid, Uuid)>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime
+            .memory(SubjectId(subject), MemoryId(memory), None)
+            .await
+            .map_err(Problem::from)?,
+    ))
+}
+
+async fn memory_history(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, memory)): Path<(Uuid, Uuid)>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime
+            .memory_history(SubjectId(subject), MemoryId(memory))
+            .await
+            .map_err(Problem::from)?,
+    ))
+}
+
+async fn revise_memory(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, memory)): Path<(Uuid, Uuid)>,
+    Json(mut input): Json<ReviseMemoryInput>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    input.subject = SubjectId(subject);
+    input.memory_id = MemoryId(memory);
+    Ok(Json(
+        runtime.revise_memory(input).await.map_err(Problem::from)?,
+    ))
+}
+
+async fn suppress_memory(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, memory)): Path<(Uuid, Uuid)>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime
+            .suppress(SubjectId(subject), MemoryId(memory))
+            .await
+            .map_err(Problem::from)?,
+    ))
+}
+
+async fn restore_memory(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, memory)): Path<(Uuid, Uuid)>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime
+            .restore(SubjectId(subject), MemoryId(memory))
+            .await
+            .map_err(Problem::from)?,
+    ))
+}
+
+async fn purge_memory(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, memory)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, Problem> {
+    runtime
+        .purge_memory(SubjectId(subject), MemoryId(memory))
+        .await
+        .map_err(Problem::from)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn query(
     State(runtime): State<LocalRuntime>,
     Path(subject): Path<Uuid>,
-    Json(input): Json<PurgeRequest>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(runtime.purge(SubjectId(subject), input).await?))
+    Json(mut input): Json<CognitiveQuery>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    input.subject = SubjectId(subject);
+    Ok(Json(runtime.query(input).await.map_err(Problem::from)?))
 }
+
+async fn use_feedback(
+    State(runtime): State<LocalRuntime>,
+    Path(subject): Path<Uuid>,
+    Json(mut input): Json<UseFeedback>,
+) -> Result<StatusCode, Problem> {
+    input.subject = SubjectId(subject);
+    runtime.use_feedback(input).await.map_err(Problem::from)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn upsert_resource(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, resource_ref)): Path<(Uuid, String)>,
+    Json(mut input): Json<ResourceUpsert>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    input.resource_ref = nous_core::ResourceRef::new(resource_ref).map_err(Problem::from)?;
+    Ok(Json(
+        runtime
+            .upsert_resource(SubjectId(subject), input)
+            .await
+            .map_err(Problem::from)?,
+    ))
+}
+
+async fn list_resources(
+    State(runtime): State<LocalRuntime>,
+    Path(subject): Path<Uuid>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime
+            .list_resources(SubjectId(subject))
+            .await
+            .map_err(Problem::from)?,
+    ))
+}
+
+async fn delete_resource(
+    State(runtime): State<LocalRuntime>,
+    Path((subject, resource_ref)): Path<(Uuid, String)>,
+) -> Result<StatusCode, Problem> {
+    let reference = nous_core::ResourceRef::new(resource_ref).map_err(Problem::from)?;
+    runtime
+        .delete_resource(SubjectId(subject), reference)
+        .await
+        .map_err(Problem::from)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn rebuild_projection(
     State(runtime): State<LocalRuntime>,
     Path(subject): Path<Uuid>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(
-        serde_json::json!({"rebuilt_rows":runtime.rebuild_projection(SubjectId(subject)).await?}),
-    ))
-}
-async fn process(
-    State(runtime): State<LocalRuntime>,
-    Path(subject): Path<Uuid>,
-    Json(limit): Json<Option<usize>>,
-) -> Result<impl IntoResponse, Problem> {
+) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
         runtime
-            .process_pending_for_subject(SubjectId(subject), limit.unwrap_or(16))
-            .await?,
-    ))
-}
-#[derive(Deserialize)]
-struct BundlePath {
-    path: String,
-}
-async fn export_bundle(
-    State(runtime): State<LocalRuntime>,
-    Path(subject): Path<Uuid>,
-    Json(input): Json<BundlePath>,
-) -> Result<impl IntoResponse, Problem> {
-    Ok(Json(
-        runtime
-            .export_bundle(SubjectId(subject), input.path)
-            .await?,
-    ))
-}
-#[derive(Deserialize)]
-struct BundleImport {
-    path: String,
-    request: ImportRequest,
-}
-async fn import_bundle(
-    State(runtime): State<LocalRuntime>,
-    Json(input): Json<BundleImport>,
-) -> Result<Json<ImportResult>, Problem> {
-    Ok(Json(
-        runtime.import_bundle(input.path, input.request).await?,
+            .rebuild_projection(SubjectId(subject))
+            .await
+            .map_err(Problem::from)?,
     ))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::StreamExt;
-    use nous_memory_service::subjects::{SeedContent, SeedInput};
+async fn create_tag(
+    State(runtime): State<LocalRuntime>,
+    Path(subject): Path<Uuid>,
+    Json(input): Json<nous_memory_service::CreateTagRequest>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime
+            .create_tag(SubjectId(subject), input)
+            .await
+            .map_err(Problem::from)?,
+    ))
+}
 
-    #[tokio::test]
-    async fn http_upload_streams_and_rejects_malformed_envelopes() {
-        let (_postgres, url, _postgres_root) = crate::support::database().await;
-        let root = tempfile::tempdir().unwrap();
-        let runtime = LocalRuntime::open_with_options(
-            &url,
-            4,
-            root.path().join("objects").to_str().unwrap(),
-            None,
-            false,
-            4 * 1024 * 1024,
-        )
-        .await
-        .unwrap();
-        let subject = runtime
-            .create_subject(CreateSubject {
-                api_version: 1,
-                label: None,
-                metadata: serde_json::json!({}),
-                memory_enabled: true,
-                character_seed: SeedInput {
-                    content: SeedContent::Inline {
-                        content: "seed".into(),
-                        media_type: "text/plain".into(),
-                    },
-                    authored_by: "host:test".into(),
-                },
-            })
+async fn create_anchor(
+    State(runtime): State<LocalRuntime>,
+    Path(subject): Path<Uuid>,
+    Json(input): Json<nous_memory_service::CreateAnchorRequest>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime
+            .create_anchor(SubjectId(subject), input)
             .await
-            .unwrap()
-            .subject_id;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let app = routes().with_state(runtime.clone());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = reqwest::Client::new();
-        let endpoint = format!("http://{address}/v1/subjects/{}/material/upload", subject.0);
-        let metadata = serde_json::json!({"api_version":1,"source_kind":"host:file","classification":{"origin":"HOST","semantic":"test:file","epistemic":"OBSERVED"},"media_type":"application/octet-stream","scope":"test","metadata":{}});
-        let header = format!(
-            "--nw\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--nw\r\nContent-Disposition: form-data; name=\"content\"; filename=\"data.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
-        );
-        let chunks = futures::stream::iter([Ok::<_, std::io::Error>(header.into_bytes())])
-            .chain(futures::stream::iter(
-                (0..4).map(|_| Ok(vec![91; 1024 * 1024])),
-            ))
-            .chain(futures::stream::iter([Ok(b"\r\n--nw--\r\n".to_vec())]));
-        let response = client
-            .post(&endpoint)
-            .header("content-type", "multipart/form-data; boundary=nw")
-            .body(reqwest::Body::wrap_stream(chunks))
-            .send()
+            .map_err(Problem::from)?,
+    ))
+}
+
+async fn create_association(
+    State(runtime): State<LocalRuntime>,
+    Path(subject): Path<Uuid>,
+    Json(input): Json<nous_memory_service::CreateAssociationRequest>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime
+            .create_association(SubjectId(subject), input)
             .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let accepted: serde_json::Value = response.json().await.unwrap();
-        let artifact = accepted["artifact_id"].as_str().unwrap();
-        let mut response = client
-            .get(format!(
-                "http://{address}/v1/subjects/{}/artifacts/{artifact}/content",
-                subject.0
-            ))
-            .send()
+            .map_err(Problem::from)?,
+    ))
+}
+
+async fn rebind_entity(
+    State(runtime): State<LocalRuntime>,
+    Path(subject): Path<Uuid>,
+    Json(input): Json<nous_memory_service::RebindEntityRequest>,
+) -> Result<Json<impl serde::Serialize>, Problem> {
+    Ok(Json(
+        runtime
+            .rebind_entity(SubjectId(subject), input)
             .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["content-length"], "4194304");
-        assert_eq!(
-            response.headers()["content-type"],
-            "application/octet-stream"
-        );
-        assert!(response.headers().contains_key("etag"));
-        let mut size = 0;
-        while let Some(chunk) = response.chunk().await.unwrap() {
-            assert!(chunk.iter().all(|b| *b == 91));
-            size += chunk.len();
-        }
-        assert_eq!(size, 4 * 1024 * 1024);
-        let source_count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM source_records WHERE subject_id=$1")
-                .bind(subject.0)
-                .fetch_one(runtime.store.pool())
-                .await
-                .unwrap();
-        let malformed = format!(
-            "--nw\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--nw\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\nsecret\r\n--nw\r\nContent-Disposition: form-data; name=\"extra\"\r\n\r\ninvalid\r\n--nw--\r\n"
-        );
-        let response = client
-            .post(&endpoint)
-            .header("content-type", "multipart/form-data; boundary=nw")
-            .body(malformed)
-            .send()
-            .await
-            .unwrap();
-        assert!(response.status().is_client_error());
-        // No source ID is returned, and malformed payloads never reach canonical commit.
-        let count_after: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM source_records WHERE subject_id=$1")
-                .bind(subject.0)
-                .fetch_one(runtime.store.pool())
-                .await
-                .unwrap();
-        assert_eq!(count_after, source_count);
-        let invalid = client
-            .post(&endpoint)
-            .header("content-type", "multipart/form-data; boundary=nw")
-            .body(
-                "--nw\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n".to_owned()
-                    + &"x".repeat(65537)
-                    + "\r\n--nw--\r\n",
-            )
-            .send()
-            .await
-            .unwrap();
-        assert!(invalid.status().is_client_error());
-        server.abort();
-        runtime.store.close().await;
-    }
+            .map_err(Problem::from)?,
+    ))
 }

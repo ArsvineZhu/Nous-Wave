@@ -107,7 +107,13 @@ impl ObjectStore {
         let mut size = 0_u64;
         futures::pin_mut!(chunks);
         while let Some(chunk) = chunks.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(&staging).await;
+                    return Err(error);
+                }
+            };
             let chunk_len = u64::try_from(chunk.len())
                 .map_err(|_| Error::Invalid("upload chunk is too large".into()))?;
             size = size
@@ -120,13 +126,15 @@ impl ObjectStore {
                 ));
             }
             hasher.update(&chunk);
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| Error::Infrastructure(e.to_string()))?;
+            if let Err(error) = file.write_all(&chunk).await {
+                let _ = tokio::fs::remove_file(&staging).await;
+                return Err(Error::Infrastructure(error.to_string()));
+            }
         }
-        file.flush()
-            .await
-            .map_err(|e| Error::Infrastructure(e.to_string()))?;
+        if let Err(error) = file.flush().await {
+            let _ = tokio::fs::remove_file(&staging).await;
+            return Err(Error::Infrastructure(error.to_string()));
+        }
         drop(file);
 
         let hash = hasher.finalize().to_hex().to_string();

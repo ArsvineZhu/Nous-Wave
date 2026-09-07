@@ -5,17 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-[features]
-portable-release = []
-
 [dependencies]
 nous-core.workspace = true
+nous-material.workspace = true
 nous-memory-service.workspace = true
 nous-memory-domain.workspace = true
-nous-memory-retrieval.workspace = true
 tokio.workspace = true
 axum.workspace = true
-multer.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,9 +21,9 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 futures.workspace = true
 postgresql_embedded.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 postgresql_embedded.workspace = true
-reqwest.workspace = true
 sqlx.workspace = true

@@ -19,10 +19,9 @@ uuid.workspace = true
 chrono.workspace = true
 sqlx.workspace = true
 blake3.workspace = true
-reqwest.workspace = true
-fastembed.workspace = true
-postgresql_embedded.workspace = true
 futures.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+postgresql_embedded.workspace = true

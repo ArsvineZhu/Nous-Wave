@@ -2,14 +2,11 @@
 bind = "127.0.0.1:9470"
 remote_access = false
 
-[microsystems]
-memory = true
-
-[postgres]
+[database]
 mode = "managed"
 url = ""
 max_connections = 8
-database = "nous_wave"
+name = "nous_wave_20260907"
 install_dir = "./data/postgres-install"
 data_dir = "./data/postgres"
 
@@ -19,35 +16,23 @@ root = "./data/objects"
 max_upload_bytes = 8589934592
 
 [retrieval]
-lancedb_uri = "./data/lancedb"
-default_effort = "normal"
+resident_limit = 256
 
-[retrieval.budgets.normal]
-max_candidates = 64
-max_association_states = 256
-max_association_edges = 1500
-
-[association]
-outbound_mass = 0.95
-backtrack_factor = 0.12
-min_activation = 0.00001
-max_hops = 8
-
-[accessibility]
-use_decay = 0.5
-
-# Local model choice is provisional until the required fixed bake-off passes.
-[models.embedding]
+[retrieval.lexical]
 enabled = true
-mode = "local"
-model = "BAAI/bge-m3"
-revision = "5617a9f61b028005a4858fdac845db406aefb181"
-preprocessing = "identity-l2-v1"
-dimension = 1024
-cache_dir = "./models"
+path = "./data/lexical"
 
-[models.rerank]
-enabled = false
+[retrieval.dense]
+enabled = true
+path = "./data/dense"
 
-[models.generation]
-enabled = false
+[retrieval.wave]
+enabled = true
+path = "./data/wave"
+
+# Providers are startup-composed capability adapters. Empty means zero-model
+# startup: Authority, exact, structured, runtime and deterministic topology
+# operations remain available.
+[providers]
+
+[capabilities]

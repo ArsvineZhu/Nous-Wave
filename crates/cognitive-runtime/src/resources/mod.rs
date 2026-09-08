@@ -1,6 +1,6 @@
 mod types;
 use crate::*;
-use nous_authority_store::database_error as db;
+use nous_authority_store::{ProjectionInvalidation, database_error as db};
 use sqlx::Row;
 pub use types::*;
 
@@ -45,26 +45,51 @@ impl CognitiveRuntimeService {
         ) {
             return Err(Error::Invalid("invalid resource readiness".into()));
         }
+        let mut tx = self.store.begin().await?;
         sqlx::query("INSERT INTO resources(subject_id,resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,resolver_key,readiness,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(subject_id,resource_ref) DO UPDATE SET display_label=excluded.display_label,authority_class=excluded.authority_class,coverage=excluded.coverage,query_dimensions=excluded.query_dimensions,modalities=excluded.modalities,freshness_policy=excluded.freshness_policy,access_cost_class=excluded.access_cost_class,resolver_key=excluded.resolver_key,readiness=excluded.readiness,updated_at=excluded.updated_at")
-            .bind(subject.0).bind(input.resource_ref.as_str()).bind(input.display_label).bind(input.authority_class).bind(input.coverage).bind(input.query_dimensions).bind(input.modalities).bind(input.freshness_policy).bind(input.access_cost_class).bind(input.resolver_key).bind(input.readiness).bind(Utc::now()).execute(self.store.pool()).await.map_err(db)?;
-        let row=sqlx::query("SELECT resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,resolver_key,readiness,updated_at FROM resources WHERE subject_id=$1 AND resource_ref=$2").bind(subject.0).bind(input.resource_ref.as_str()).fetch_one(self.store.pool()).await.map_err(db)?;
+            .bind(subject.0).bind(input.resource_ref.as_str()).bind(input.display_label).bind(input.authority_class).bind(input.coverage).bind(input.query_dimensions).bind(input.modalities).bind(input.freshness_policy).bind(input.access_cost_class).bind(input.resolver_key).bind(input.readiness).bind(Utc::now()).execute(&mut *tx).await.map_err(db)?;
+        let row=sqlx::query("SELECT resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,resolver_key,readiness,updated_at FROM resources WHERE subject_id=$1 AND resource_ref=$2").bind(subject.0).bind(input.resource_ref.as_str()).fetch_one(&mut *tx).await.map_err(db)?;
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation {
+                exact: true,
+                topology: true,
+                ..ProjectionInvalidation::default()
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(db)?;
         Ok(ResourceView {
             descriptor: decode_resource(subject, row)?,
         })
     }
 
     pub async fn delete_resource(&self, subject: SubjectId, resource: ResourceRef) -> Result<()> {
+        let mut tx = self.store.begin().await?;
         sqlx::query("DELETE FROM resources WHERE subject_id=$1 AND resource_ref=$2")
             .bind(subject.0)
             .bind(resource.as_str())
-            .execute(self.store.pool())
+            .execute(&mut *tx)
             .await
             .map_err(db)?;
-        sqlx::query("DELETE FROM resident_refs WHERE ref_kind='resource' AND ref_value=$1")
+        sqlx::query("DELETE FROM resident_refs r USING cognitive_sessions s WHERE r.session_id=s.session_id AND s.subject_id=$1 AND r.ref_kind='resource' AND r.ref_value=$2")
+            .bind(subject.0)
             .bind(resource.as_str())
-            .execute(self.store.pool())
+            .execute(&mut *tx)
             .await
             .map_err(db)?;
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation {
+                exact: true,
+                topology: true,
+                ..ProjectionInvalidation::default()
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(db)?;
         Ok(())
     }
 
@@ -84,9 +109,11 @@ impl CognitiveRuntimeService {
     pub async fn resource_actions_for_query(
         &self,
         query: &CognitiveQuery,
+        plan: &QueryPlan,
     ) -> Result<(Vec<ResourceActionSuggestion>, Vec<Degradation>)> {
         if query.resources.current_authority == CurrentAuthorityNeed::None
             && !query.resources.synopsis_only
+            && !plan.prefer_resource_synopsis
         {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -106,7 +133,7 @@ impl CognitiveRuntimeService {
             .clone();
         let mut actions = Vec::new();
         let mut degradation = Vec::new();
-        for resource in resources {
+        for resource in resources.into_iter().take(plan.resource_limit) {
             let descriptor = resource.descriptor;
             if descriptor.readiness != "ready"
                 || (!requested.is_empty() && !requested.contains(descriptor.resource_ref.as_str()))
@@ -135,7 +162,8 @@ impl CognitiveRuntimeService {
                     ResourceQuery {
                         dimensions: descriptor.query_dimensions.clone(),
                         synopsis_only: query.resources.synopsis_only,
-                        limit: query.result_need.limit,
+                        prefer_synopsis: plan.prefer_resource_synopsis,
+                        limit: plan.resource_limit,
                     },
                 )
                 .await;

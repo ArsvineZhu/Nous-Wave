@@ -45,6 +45,8 @@ pub struct ResourceView {
 pub struct ResourceQuery {
     pub dimensions: serde_json::Value,
     pub synopsis_only: bool,
+    #[serde(default)]
+    pub prefer_synopsis: bool,
     pub limit: usize,
 }
 

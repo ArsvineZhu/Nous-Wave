@@ -31,17 +31,21 @@ impl ServingService {
         digest(&config)
     }
 
-    pub async fn refresh(&self, subject: SubjectId) -> Result<ProjectionStatus> {
+    /// Prepare only the serving families required by one semantic query.
+    pub async fn prepare(&self, subject: SubjectId, need: ServingNeed) -> Result<ProjectionStatus> {
         self.store.require_subject(subject).await?;
         let current = self.store.serving_current(subject).await?;
-        let mut requested = vec![("exact", String::new())];
-        if self.options.lexical {
+        let mut requested = Vec::new();
+        if need.exact {
+            requested.push(("exact", String::new()));
+        }
+        if need.lexical && self.options.lexical {
             requested.push(("lexical", String::new()));
         }
-        if self.options.topology {
+        if need.topology && self.options.topology {
             requested.push(("topology", String::new()));
         }
-        if self.options.dense {
+        if need.dense && self.options.dense {
             if let Some(provider) = &self.embedding {
                 requested.push(("dense", provider.space().space_hash));
             } else {
@@ -116,6 +120,20 @@ impl ServingService {
             }
         }
         Ok(result)
+    }
+
+    /// Administrative operation: refresh every configured family.
+    pub async fn refresh(&self, subject: SubjectId) -> Result<ProjectionStatus> {
+        self.prepare(
+            subject,
+            ServingNeed {
+                exact: true,
+                lexical: self.options.lexical,
+                dense: self.options.dense,
+                topology: self.options.topology,
+            },
+        )
+        .await
     }
 
     async fn build_and_open(

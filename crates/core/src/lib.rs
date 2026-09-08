@@ -576,6 +576,7 @@ pub enum ExplorationIntent {
     AroundTag,
     AroundAnchor,
     ExplainAssociation,
+    Global,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -837,6 +838,16 @@ pub struct CognitiveQueryResult {
     #[serde(default)]
     pub degradation: Vec<Degradation>,
     pub diagnostics: Option<QueryDiagnostics>,
+}
+
+/// Semantic serving families required by one query.  This stays independent
+/// of the concrete index implementation used to serve each family.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServingNeed {
+    pub exact: bool,
+    pub lexical: bool,
+    pub dense: bool,
+    pub topology: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -18,12 +18,21 @@ impl CognitiveRuntimeService {
         query: CognitiveQuery,
         memory: Option<&dyn CognitiveContributor>,
     ) -> Result<CognitiveQueryResult> {
+        let plan = QueryPlan::for_query(&query);
+        self.query_with_plan(query, memory, plan).await
+    }
+
+    pub async fn query_with_plan(
+        &self,
+        query: CognitiveQuery,
+        memory: Option<&dyn CognitiveContributor>,
+        plan: QueryPlan,
+    ) -> Result<CognitiveQueryResult> {
         query.validate()?;
         self.require_subject(query.subject).await?;
         if let Some(session) = query.session {
             self.require_session(query.subject, session).await?;
         }
-        let plan = QueryPlan::for_query(&query);
         let mut result = if let Some(memory) = memory {
             memory.contribute(&query, &plan).await?
         } else {
@@ -82,7 +91,7 @@ impl CognitiveRuntimeService {
                 }
             }
         }
-        let (actions, degradation) = self.resource_actions_for_query(&query).await?;
+        let (actions, degradation) = self.resource_actions_for_query(&query, &plan).await?;
         result.resource_actions = actions;
         result.degradation.extend(degradation);
         result.results.sort_by(|a, b| {
@@ -127,6 +136,13 @@ impl CognitiveRuntimeService {
             diagnostics
                 .candidate_counts
                 .insert("planned_candidate_bound".into(), plan.candidate_limit);
+            diagnostics.lane_status.insert(
+                "resource_plan".into(),
+                format!(
+                    "limit={},synopsis_preferred={}",
+                    plan.resource_limit, plan.prefer_resource_synopsis
+                ),
+            );
         }
         Ok(result)
     }

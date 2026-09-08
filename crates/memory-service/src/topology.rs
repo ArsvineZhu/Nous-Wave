@@ -31,16 +31,16 @@ impl MemoryService {
             .execute(&mut *tx)
             .await
             .map_err(db)?;
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation {
+                topology: true,
+                ..ProjectionInvalidation::text()
+            },
+        )
+        .await?;
         tx.commit().await.map_err(db)?;
-        self.store
-            .invalidate(
-                subject,
-                ProjectionInvalidation {
-                    topology: true,
-                    ..ProjectionInvalidation::text()
-                },
-            )
-            .await?;
         Ok(Tag {
             tag_id,
             subject_id: subject,
@@ -119,16 +119,16 @@ impl MemoryService {
             sqlx::query("INSERT INTO anchor_support(anchor_revision_id,support_ref_kind,support_ref,support_role,provenance) VALUES($1,$2,$3,$4,'{}')")
                 .bind(revision_id).bind(kind).bind(value).bind(support.role).execute(&mut *tx).await.map_err(db)?;
         }
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation {
+                topology: true,
+                ..ProjectionInvalidation::text()
+            },
+        )
+        .await?;
         tx.commit().await.map_err(db)?;
-        self.store
-            .invalidate(
-                subject,
-                ProjectionInvalidation {
-                    topology: true,
-                    ..ProjectionInvalidation::text()
-                },
-            )
-            .await?;
         Ok(Anchor {
             anchor_id,
             subject_id: subject,
@@ -227,8 +227,9 @@ impl MemoryService {
         let (to_kind, to_ref) = reference_parts(&input.to);
         let id = Uuid::now_v7();
         let now = Utc::now();
+        let mut tx = self.store.begin().await?;
         sqlx::query("INSERT INTO association_evidence(association_evidence_id,subject_id,from_ref_kind,from_ref,to_ref_kind,to_ref,association_kind,polarity,support_class,support_value,occurrence_id,memory_revision_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
-            .bind(id).bind(subject.0).bind(&from_kind).bind(&from_ref).bind(&to_kind).bind(&to_ref).bind(&input.association_kind).bind(input.polarity.as_str()).bind(input.support_class.as_str()).bind(input.support_value).bind(input.occurrence_id.map(|id| id.0)).bind(input.memory_revision_id.map(|id| id.0)).bind(now).execute(self.store.pool()).await.map_err(db)?;
+            .bind(id).bind(subject.0).bind(&from_kind).bind(&from_ref).bind(&to_kind).bind(&to_ref).bind(&input.association_kind).bind(input.polarity.as_str()).bind(input.support_class.as_str()).bind(input.support_value).bind(input.occurrence_id.map(|id| id.0)).bind(input.memory_revision_id.map(|id| id.0)).bind(now).execute(&mut *tx).await.map_err(db)?;
         let result = AssociationEvidence {
             association_evidence_id: id,
             subject_id: subject,
@@ -248,9 +249,13 @@ impl MemoryService {
             created_at: now,
             revoked_at: None,
         };
-        self.store
-            .invalidate(subject, ProjectionInvalidation::topology())
-            .await?;
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation::topology(),
+        )
+        .await?;
+        tx.commit().await.map_err(db)?;
         Ok(result)
     }
 
@@ -287,13 +292,18 @@ impl MemoryService {
                 "unbound/disputed binding cannot carry an EntityRef".into(),
             ));
         }
+        let mut tx = self.store.begin().await?;
         let next: i32 = sqlx::query_scalar("SELECT COALESCE(max(revision_no),0)+1 FROM entity_binding_revisions WHERE mention_id=$1")
-            .bind(input.mention_id).fetch_one(self.store.pool()).await.map_err(db)?;
+            .bind(input.mention_id).fetch_one(&mut *tx).await.map_err(db)?;
         sqlx::query("INSERT INTO entity_binding_revisions(binding_revision_id,mention_id,revision_no,entity_ref,binding_state,host_resolution_ref,reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
-            .bind(Uuid::now_v7()).bind(input.mention_id).bind(next).bind(input.entity_ref.as_ref().map(EntityRef::as_str)).bind(input.binding_state).bind(input.host_resolution_ref).bind(input.reason).bind(Utc::now()).execute(self.store.pool()).await.map_err(db)?;
-        self.store
-            .invalidate(subject, ProjectionInvalidation::identity())
-            .await?;
+            .bind(Uuid::now_v7()).bind(input.mention_id).bind(next).bind(input.entity_ref.as_ref().map(EntityRef::as_str)).bind(input.binding_state).bind(input.host_resolution_ref).bind(input.reason).bind(Utc::now()).execute(&mut *tx).await.map_err(db)?;
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation::identity(),
+        )
+        .await?;
+        tx.commit().await.map_err(db)?;
         Ok(())
     }
 }

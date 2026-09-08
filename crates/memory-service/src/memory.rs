@@ -35,30 +35,49 @@ impl MemoryService {
         for entity in &input.entity_refs {
             EntityRef::new(entity.as_str())?;
         }
+        let mut tx = self.store.begin().await?;
+        let (memory_id, _revision_id) = self.insert_memory_authority(&mut tx, &input).await?;
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            input.subject,
+            ProjectionInvalidation {
+                topology: true,
+                ..ProjectionInvalidation::text()
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(db)?;
+        self.memory(input.subject, memory_id, None).await
+    }
+
+    async fn insert_memory_authority(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        input: &ExplicitMemoryInput,
+    ) -> Result<(MemoryId, MemoryRevisionId)> {
         let memory_id = MemoryId::new();
         let revision_id = MemoryRevisionId::new();
         let now = Utc::now();
-        let mut tx = self.store.begin().await?;
         sqlx::query("INSERT INTO memory_objects(memory_id,subject_id,memory_class,current_revision_id,created_at,status) VALUES($1,$2,$3,$4,$5,'active')")
-            .bind(memory_id.0).bind(input.subject.0).bind(input.memory_class.as_str()).bind(revision_id.0).bind(now).execute(&mut *tx).await.map_err(db)?;
+            .bind(memory_id.0).bind(input.subject.0).bind(input.memory_class.as_str()).bind(revision_id.0).bind(now).execute(&mut **tx).await.map_err(db)?;
         sqlx::query("INSERT INTO memory_revisions(memory_revision_id,memory_id,subject_id,revision_no,parent_revision_id,semantic_role,title,representation_text,attributes,epistemic_class,confidence,occurred_at,observed_at,valid_from,valid_to,created_at,supersession_state) VALUES($1,$2,$3,1,NULL,$4,$5,$6,'{}',$7,$8,$9,$10,$11,$12,$13,'current')")
-            .bind(revision_id.0).bind(memory_id.0).bind(input.subject.0).bind(&input.semantic_role).bind(&input.title).bind(&input.representation_text).bind(format!("{:?}",input.epistemic_class).to_lowercase()).bind(input.confidence).bind(input.occurred_at).bind(input.observed_at).bind(input.valid_from).bind(input.valid_to).bind(now).execute(&mut *tx).await.map_err(db)?;
+            .bind(revision_id.0).bind(memory_id.0).bind(input.subject.0).bind(&input.semantic_role).bind(&input.title).bind(&input.representation_text).bind(format!("{:?}",input.epistemic_class).to_lowercase()).bind(input.confidence).bind(input.occurred_at).bind(input.observed_at).bind(input.valid_from).bind(input.valid_to).bind(now).execute(&mut **tx).await.map_err(db)?;
         sqlx::query("UPDATE memory_objects SET current_revision_id=$2 WHERE memory_id=$1")
             .bind(memory_id.0)
             .bind(revision_id.0)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(db)?;
         for evidence in &input.evidence {
-            insert_evidence(&mut tx, revision_id, evidence).await?;
+            insert_evidence(tx, revision_id, evidence).await?;
         }
         for (ordinal, tag) in input.tags.iter().enumerate() {
-            let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tags WHERE subject_id=$1 AND tag_id=$2 AND status='active')").bind(input.subject.0).bind(tag.0).fetch_one(&mut *tx).await.map_err(db)?;
+            let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tags WHERE subject_id=$1 AND tag_id=$2 AND status='active')").bind(input.subject.0).bind(tag.0).fetch_one(&mut **tx).await.map_err(db)?;
             if !exists {
                 return Err(Error::Invalid("tag does not belong to Subject".into()));
             }
             sqlx::query("INSERT INTO memory_revision_tags(memory_revision_id,tag_id,role,ordinal,provenance) VALUES($1,$2,'explicit',$3,'{}')")
-                .bind(revision_id.0).bind(tag.0).bind(ordinal as i32).execute(&mut *tx).await.map_err(db)?;
+                .bind(revision_id.0).bind(tag.0).bind(ordinal as i32).execute(&mut **tx).await.map_err(db)?;
         }
         let entity_attachment = input.evidence.first().map(|item| item.evidence.clone());
         for entity in &input.entity_refs {
@@ -87,7 +106,7 @@ impl MemoryService {
                     )
                     .bind(derived_representation_id.0)
                     .bind(input.subject.0)
-                    .fetch_optional(&mut *tx)
+                    .fetch_optional(&mut **tx)
                     .await
                     .map_err(db)?;
                     (None, source_region, None)
@@ -102,24 +121,13 @@ impl MemoryService {
                 .bind(derived_region_id)
                 .bind(entity.as_str())
                 .bind(now)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await
                 .map_err(db)?;
             sqlx::query("INSERT INTO entity_binding_revisions(binding_revision_id,mention_id,revision_no,entity_ref,binding_state,created_at) VALUES($1,$2,1,$3,'bound',$4)")
-                .bind(Uuid::now_v7()).bind(mention_id).bind(entity.as_str()).bind(now).execute(&mut *tx).await.map_err(db)?;
+                .bind(Uuid::now_v7()).bind(mention_id).bind(entity.as_str()).bind(now).execute(&mut **tx).await.map_err(db)?;
         }
-        tx.commit().await.map_err(db)?;
-        let view = self.memory(input.subject, memory_id, None).await?;
-        self.store
-            .invalidate(
-                input.subject,
-                ProjectionInvalidation {
-                    topology: true,
-                    ..ProjectionInvalidation::text()
-                },
-            )
-            .await?;
-        Ok(view)
+        Ok((memory_id, revision_id))
     }
 
     pub async fn commit_formation_proposal(
@@ -139,24 +147,41 @@ impl MemoryService {
                 "formation proposal contains an EntityRef not supplied by Host context".into(),
             ));
         }
+        self.validate_evidence(subject, &proposal.evidence).await?;
+        if proposal.evidence.iter().any(|evidence| {
+            evidence
+                .weight
+                .is_some_and(|weight| !weight.is_finite() || weight < 0.0)
+        }) {
+            return Err(Error::Invalid(
+                "revision evidence weight must be finite and non-negative".into(),
+            ));
+        }
+        for entity in &proposal.entity_refs {
+            EntityRef::new(entity.as_str())?;
+        }
         let tag_proposals = proposal.tag_proposals.clone();
-        let memory = self
-            .form_memory(ExplicitMemoryInput {
-                subject,
-                memory_class: proposal.memory_class,
-                semantic_role: proposal.semantic_role,
-                representation_text: proposal.representation_text,
-                title: proposal.title,
-                evidence: proposal.evidence,
-                entity_refs: proposal.entity_refs,
-                tags: Vec::new(),
-                occurred_at: proposal.occurred_at,
-                observed_at: Utc::now(),
-                valid_from: proposal.valid_from,
-                valid_to: proposal.valid_to,
-                epistemic_class: proposal.epistemic_class,
-                confidence: proposal.confidence,
-            })
+        let mut tx = self.store.begin().await?;
+        let (memory_id, revision_id) = self
+            .insert_memory_authority(
+                &mut tx,
+                &ExplicitMemoryInput {
+                    subject,
+                    memory_class: proposal.memory_class,
+                    semantic_role: proposal.semantic_role,
+                    representation_text: proposal.representation_text,
+                    title: proposal.title,
+                    evidence: proposal.evidence,
+                    entity_refs: proposal.entity_refs,
+                    tags: Vec::new(),
+                    occurred_at: proposal.occurred_at,
+                    observed_at: Utc::now(),
+                    valid_from: proposal.valid_from,
+                    valid_to: proposal.valid_to,
+                    epistemic_class: proposal.epistemic_class,
+                    confidence: proposal.confidence,
+                },
+            )
             .await?;
         for tag in tag_proposals {
             let existing = sqlx::query_scalar::<_, Uuid>(
@@ -164,44 +189,40 @@ impl MemoryService {
             )
             .bind(subject.0)
             .bind(&tag.label)
-            .fetch_optional(self.store.pool())
+            .fetch_optional(&mut *tx)
             .await
             .map_err(db)?;
             let tag_id = if let Some(tag_id) = existing {
                 TagId(tag_id)
             } else {
-                self.create_tag(
-                    subject,
-                    CreateTagRequest {
-                        label: tag.label,
-                        description: tag.description,
-                        kind_hint: tag.kind_hint,
-                        origin: "model_proposed".into(),
-                    },
-                )
-                .await?
-                .tag_id
+                let tag_id = TagId::new();
+                let tag_revision_id = Uuid::now_v7();
+                let now = Utc::now();
+                sqlx::query("INSERT INTO tags(tag_id,subject_id,current_revision_id,created_at,status) VALUES($1,$2,$3,$4,'active')")
+                    .bind(tag_id.0).bind(subject.0).bind(tag_revision_id).bind(now).execute(&mut *tx).await.map_err(db)?;
+                sqlx::query("INSERT INTO tag_revisions(tag_revision_id,tag_id,revision_no,label,description,kind_hint,origin,created_at) VALUES($1,$2,1,$3,$4,$5,'model_proposed',$6)")
+                    .bind(tag_revision_id).bind(tag_id.0).bind(&tag.label).bind(&tag.description).bind(&tag.kind_hint).bind(now).execute(&mut *tx).await.map_err(db)?;
+                tag_id
             };
             sqlx::query("INSERT INTO memory_revision_tags(memory_revision_id,tag_id,role,ordinal,provenance) VALUES($1,$2,'inferred',NULL,$3) ON CONFLICT DO NOTHING")
-                .bind(memory.revision.memory_revision_id.0)
+                .bind(revision_id.0)
                 .bind(tag_id.0)
                 .bind(serde_json::json!({"origin":"formation_proposal"}))
-                .execute(self.store.pool())
+                .execute(&mut *tx)
                 .await
                 .map_err(db)?;
         }
-        if !proposal.tag_proposals.is_empty() {
-            self.store
-                .invalidate(
-                    subject,
-                    ProjectionInvalidation {
-                        topology: true,
-                        ..ProjectionInvalidation::text()
-                    },
-                )
-                .await?;
-        }
-        Ok(memory)
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation {
+                topology: true,
+                ..ProjectionInvalidation::text()
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(db)?;
+        self.memory(subject, memory_id, None).await
     }
 
     pub async fn memory(
@@ -342,73 +363,80 @@ impl MemoryService {
         for evidence in &input.evidence {
             insert_evidence(&mut tx, new_id, evidence).await?;
         }
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            input.subject,
+            ProjectionInvalidation {
+                topology: true,
+                ..ProjectionInvalidation::text()
+            },
+        )
+        .await?;
         tx.commit().await.map_err(db)?;
         let view = self.memory(input.subject, input.memory_id, None).await?;
-        self.store
-            .invalidate(
-                input.subject,
-                ProjectionInvalidation {
-                    topology: true,
-                    ..ProjectionInvalidation::text()
-                },
-            )
-            .await?;
         Ok(view)
     }
 
     pub async fn suppress(&self, subject: SubjectId, memory: MemoryId) -> Result<MemoryView> {
+        let mut tx = self.store.begin().await?;
         let changed = sqlx::query(
             "UPDATE memory_objects SET status='suppressed' WHERE subject_id=$1 AND memory_id=$2",
         )
         .bind(subject.0)
         .bind(memory.0)
-        .execute(self.store.pool())
+        .execute(&mut *tx)
         .await
         .map_err(db)?;
         if changed.rows_affected() == 0 {
             return Err(Error::NotFound("memory not found".into()));
         }
-        sqlx::query("DELETE FROM resident_refs WHERE ref_kind='memory' AND ref_value=$1 OR ref_kind='memory_revision' AND ref_value IN (SELECT memory_revision_id::text FROM memory_revisions WHERE memory_id=$2)")
-            .bind(memory.0.to_string())
-            .bind(memory.0)
-            .execute(self.store.pool())
-            .await
-            .map_err(db)?;
+        sqlx::query(
+            "DELETE FROM resident_refs r USING cognitive_sessions s WHERE r.session_id=s.session_id AND s.subject_id=$1 AND ((r.ref_kind='memory' AND r.ref_value=$2) OR (r.ref_kind='memory_revision' AND r.ref_value IN (SELECT memory_revision_id::text FROM memory_revisions WHERE memory_id=$3)))",
+        )
+        .bind(subject.0)
+        .bind(memory.0.to_string())
+        .bind(memory.0)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation {
+                topology: true,
+                ..ProjectionInvalidation::text()
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(db)?;
         let view = self.memory(subject, memory, None).await?;
-        self.store
-            .invalidate(
-                subject,
-                ProjectionInvalidation {
-                    topology: true,
-                    ..ProjectionInvalidation::text()
-                },
-            )
-            .await?;
         Ok(view)
     }
 
     pub async fn restore(&self, subject: SubjectId, memory: MemoryId) -> Result<MemoryView> {
+        let mut tx = self.store.begin().await?;
         let changed = sqlx::query(
             "UPDATE memory_objects SET status='active' WHERE subject_id=$1 AND memory_id=$2",
         )
         .bind(subject.0)
         .bind(memory.0)
-        .execute(self.store.pool())
+        .execute(&mut *tx)
         .await
         .map_err(db)?;
         if changed.rows_affected() == 0 {
             return Err(Error::NotFound("memory not found".into()));
         }
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation {
+                topology: true,
+                ..ProjectionInvalidation::text()
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(db)?;
         let view = self.memory(subject, memory, None).await?;
-        self.store
-            .invalidate(
-                subject,
-                ProjectionInvalidation {
-                    topology: true,
-                    ..ProjectionInvalidation::text()
-                },
-            )
-            .await?;
         Ok(view)
     }
 
@@ -512,11 +540,21 @@ impl MemoryService {
                 .into_iter()
                 .map(|revision| revision.to_string()),
         );
-        sqlx::query("DELETE FROM resident_refs WHERE ref_kind IN ('memory','memory_revision') AND ref_value=ANY($1)")
+        sqlx::query("DELETE FROM resident_refs r USING cognitive_sessions s WHERE r.session_id=s.session_id AND s.subject_id=$1 AND r.ref_kind IN ('memory','memory_revision') AND r.ref_value=ANY($2)")
+            .bind(subject.0)
             .bind(&ref_values)
             .execute(&mut *tx)
             .await
             .map_err(db)?;
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation {
+                topology: true,
+                ..ProjectionInvalidation::text()
+            },
+        )
+        .await?;
         tx.commit().await.map_err(db)?;
         let mut removable_hashes = Vec::new();
         artifact_ids.sort_unstable();
@@ -555,15 +593,6 @@ impl MemoryService {
             }
         }
         drop(guard);
-        self.store
-            .invalidate(
-                subject,
-                ProjectionInvalidation {
-                    topology: true,
-                    ..ProjectionInvalidation::text()
-                },
-            )
-            .await?;
         Ok(())
     }
 

@@ -7,6 +7,16 @@ impl MemoryService {
     // Query orchestration retains lane ordering and evidence-family semantics together.
     #[allow(clippy::excessive_nesting, clippy::too_many_lines)]
     pub async fn query(&self, query: CognitiveQuery) -> Result<CognitiveQueryResult> {
+        let plan = nous_cognitive_runtime::QueryPlan::for_query(&query);
+        self.query_with_plan(query, &plan).await
+    }
+
+    #[allow(clippy::excessive_nesting, clippy::too_many_lines)]
+    pub async fn query_with_plan(
+        &self,
+        query: CognitiveQuery,
+        plan: &nous_cognitive_runtime::QueryPlan,
+    ) -> Result<CognitiveQueryResult> {
         query.validate()?;
         self.require_subject(query.subject).await?;
         if let Some(session) = query.session {
@@ -97,15 +107,15 @@ impl MemoryService {
             .join(" ")
             .trim()
             .to_owned();
-        let mut lexical_ranks = HashMap::<CognitiveRef, usize>::new();
+        let mut candidates = CandidateAccumulator::default();
         if !pattern.is_empty()
             && let Some(lexical) = &snapshot.lexical
         {
-            match lexical.search(&pattern, 64) {
+            match lexical.search(&pattern, plan.candidate_limit) {
                 Ok(matches) => {
                     for (rank, item) in matches.into_iter().enumerate() {
                         if let Some(reference) = item.reference {
-                            lexical_ranks.entry(reference).or_insert(rank + 1);
+                            candidates.add_lexical(reference, rank + 1);
                         }
                     }
                 }
@@ -115,8 +125,6 @@ impl MemoryService {
                 }),
             }
         }
-        let mut dense_ranks = HashMap::<CognitiveRef, usize>::new();
-        let mut dense_variants = HashMap::<CognitiveRef, HashSet<String>>::new();
         let mut query_embedding = None;
         if !pattern.is_empty()
             && query.capabilities.text_embedding != RequirementStrength::Forbidden
@@ -139,21 +147,13 @@ impl MemoryService {
                         }
                         matched_space = true;
                         for (rank, item) in generation
-                            .search(&output.vector, 64)
+                            .search(&output.vector, plan.candidate_limit)
                             .map_err(|error| Error::Infrastructure(error.to_string()))?
                             .into_iter()
                             .enumerate()
                         {
-                            if let Some(record) = item.record
-                                && matches!(record.reference, CognitiveRef::Memory(_))
-                            {
-                                dense_ranks
-                                    .entry(record.reference.clone())
-                                    .or_insert(rank + 1);
-                                dense_variants
-                                    .entry(record.reference)
-                                    .or_default()
-                                    .insert("direct_dense".into());
+                            if let Some(record) = item.record {
+                                candidates.add_dense(record.reference, rank + 1, "direct_dense");
                             }
                         }
                     }
@@ -238,10 +238,12 @@ impl MemoryService {
             }
         }
         let mut residual_trace = None;
+        let mut residual_seed_refs = Vec::new();
         let mut epa_trace = None;
         let mut epa_generation = None;
         if let Some(output) = &query_embedding {
-            if query.capabilities.residual_sensing != RequirementStrength::Forbidden
+            if plan.sense_cues
+                && query.capabilities.residual_sensing != RequirementStrength::Forbidden
                 && let Some(generation) = snapshot
                     .dense
                     .iter()
@@ -260,7 +262,10 @@ impl MemoryService {
                         .iter()
                         .map(|value| f64::from(*value))
                         .collect::<Vec<_>>(),
-                    ResidualConfig::default(),
+                    ResidualConfig {
+                        top_k_per_level: plan.candidate_limit.clamp(1, 64),
+                        ..ResidualConfig::default()
+                    },
                     |residual, limit| {
                         let residual = residual
                             .iter()
@@ -297,15 +302,18 @@ impl MemoryService {
                             && !tag_cues.contains(tag)
                         {
                             tag_cues.push(*tag);
+                            residual_seed_refs
+                                .push((CognitiveRef::Tag(*tag), sensed.seed_weight.max(0.0)));
                         }
                     }
                     residual_trace = Some(residual);
                 }
             }
-            if let Some(generation) = snapshot
-                .epa
-                .iter()
-                .find(|generation| generation.basis.embedding_space == output.space.space_hash)
+            if plan.sense_cues
+                && let Some(generation) = snapshot
+                    .epa
+                    .iter()
+                    .find(|generation| generation.basis.embedding_space == output.space.space_hash)
             {
                 epa_generation = Some(generation.generation_id);
                 epa_trace = observe_epa(
@@ -363,19 +371,13 @@ impl MemoryService {
                         if !generation.space.compatible_with(&output.space) {
                             continue;
                         }
-                        for (rank, item) in
-                            generation.search(&denoised, 64)?.into_iter().enumerate()
+                        for (rank, item) in generation
+                            .search(&denoised, plan.candidate_limit)?
+                            .into_iter()
+                            .enumerate()
                         {
-                            if let Some(record) = item.record
-                                && matches!(record.reference, CognitiveRef::Memory(_))
-                            {
-                                dense_ranks
-                                    .entry(record.reference.clone())
-                                    .or_insert(rank + 1);
-                                dense_variants
-                                    .entry(record.reference)
-                                    .or_default()
-                                    .insert("denoised_dense".into());
+                            if let Some(record) = item.record {
+                                candidates.add_dense(record.reference, rank + 1, "denoised_dense");
                             }
                         }
                     }
@@ -384,6 +386,7 @@ impl MemoryService {
         }
         let mut candidate_memory_ids = HashSet::<Uuid>::new();
         for reference in &exact_refs {
+            candidates.mark_exact(reference.clone());
             match reference {
                 CognitiveRef::Memory(memory) => {
                     candidate_memory_ids.insert(memory.0);
@@ -413,6 +416,7 @@ impl MemoryService {
                 _ => None,
             }))
         {
+            candidates.mark_runtime(reference.clone());
             if let CognitiveRef::Memory(memory) = reference {
                 candidate_memory_ids.insert(memory.0);
             }
@@ -451,8 +455,22 @@ impl MemoryService {
                 })
                 .map(|reference| reference.to_string()),
         );
+        let mut posting_budget = plan.candidate_limit;
         for key in posting_keys {
-            for reference in snapshot.postings.references(&key) {
+            let lane = if key.starts_with("entity:") {
+                "entity_posting"
+            } else if key.starts_with("tag:") {
+                "tag_posting"
+            } else {
+                "anchor_posting"
+            };
+            if posting_budget == 0 {
+                break;
+            }
+            let references = snapshot.postings.references(&key);
+            let consumed = references.len().min(posting_budget);
+            for reference in references.into_iter().take(posting_budget) {
+                candidates.add_posting(reference.clone(), lane);
                 match reference {
                     CognitiveRef::Memory(memory) => {
                         candidate_memory_ids.insert(memory.0);
@@ -473,8 +491,12 @@ impl MemoryService {
                     _ => {}
                 }
             }
+            posting_budget -= consumed;
         }
-        if let Some(wave) = &snapshot.wave {
+        let mut topology_state = None;
+        if plan.expand_topology
+            && let Some(wave) = &snapshot.wave
+        {
             let seeds = wave_seeds(
                 wave,
                 &query,
@@ -482,9 +504,18 @@ impl MemoryService {
                 &entity_cues,
                 &anchor_cues,
                 &exact_refs,
+                &residual_seed_refs,
+                query_embedding
+                    .as_ref()
+                    .map(|embedding| embedding.space.space_hash.as_str()),
             );
             if !seeds.is_empty() {
-                let river = propagate(wave, &seeds);
+                let river = propagate_weighted_with_budget(
+                    wave,
+                    &seeds,
+                    plan.topology_rounds,
+                    plan.topology_nodes,
+                );
                 let mut topology_candidates = river
                     .provenance
                     .iter()
@@ -502,26 +533,77 @@ impl MemoryService {
                         .total_cmp(&left.0)
                         .then_with(|| left.1.cmp(&right.1))
                 });
-                for (_, memory) in topology_candidates.into_iter().take(128) {
+                for (_, memory) in topology_candidates
+                    .into_iter()
+                    .take(plan.topology_nodes.min(plan.candidate_limit))
+                {
                     candidate_memory_ids.insert(memory);
+                }
+                let local = bounded_restart_field(
+                    wave,
+                    &river.source_field,
+                    wave.config.local_alpha,
+                    plan.topology_rounds,
+                );
+                let transfer = bounded_restart_field(
+                    wave,
+                    &river.source_field,
+                    wave.config.transfer_alpha,
+                    plan.topology_rounds,
+                );
+                topology_state = Some((river, local, transfer, wave.clone()));
+            }
+        }
+        if let Some((_, local, transfer, wave)) = &topology_state
+            && let Some(output) = &query_embedding
+        {
+            for (variant, field) in [
+                ("local_field_dense", local),
+                ("transfer_field_dense", transfer),
+            ] {
+                for generation in &snapshot.dense {
+                    if !generation.space.compatible_with(&output.space) {
+                        continue;
+                    }
+                    let Some(vector) = field_vector(wave, field, generation) else {
+                        continue;
+                    };
+                    for (rank, item) in generation
+                        .search(&vector, plan.candidate_limit)?
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if let Some(record) = item.record {
+                            let reference = record.reference.clone();
+                            candidates.add_dense(reference.clone(), rank + 1, variant);
+                            if let CognitiveRef::Memory(memory) = record.reference {
+                                candidate_memory_ids.insert(memory.0);
+                            }
+                        }
+                    }
                 }
             }
         }
-        for reference in lexical_ranks.keys() {
+        for reference in candidates.candidate_refs() {
             if let CognitiveRef::Memory(memory) = reference {
                 candidate_memory_ids.insert(memory.0);
             }
         }
-        for reference in dense_ranks.keys() {
-            if let CognitiveRef::Memory(memory) = reference {
-                candidate_memory_ids.insert(memory.0);
-            }
-        }
+        let lexical_ranks = candidates.lexical_ranks();
+        let dense_ranks = candidates.dense_ranks();
+        let dense_variants = candidates.dense_variants();
         let resident_refs = if let Some(session) = query.session {
             self.cognition.resident_reference_strings(session).await?
         } else {
             HashSet::new()
         };
+        for value in &resident_refs {
+            if let Some((kind, value)) = value.split_once(':')
+                && let Ok(reference) = parse_reference(kind, value)
+            {
+                candidates.mark_runtime(reference);
+            }
+        }
         let mut resident_occurrences = resident_refs
             .iter()
             .filter_map(|value| {
@@ -558,7 +640,7 @@ impl MemoryService {
             Vec::new()
         } else if !candidate_memory_ids.is_empty() {
             let ids = candidate_memory_ids.iter().copied().collect::<Vec<_>>();
-            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.confidence,r.occurred_at,r.observed_at,r.valid_from,r.valid_to,r.supersession_state FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR o.status='active') AND o.memory_id=ANY($3) ORDER BY r.observed_at DESC LIMIT 2048")
+            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.confidence,r.occurred_at,r.observed_at,r.valid_from,r.valid_to,r.supersession_state FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR o.status='active') AND o.memory_id=ANY($3) ORDER BY r.observed_at DESC")
                 .bind(query.subject.0)
                 .bind(query.constraints.include_suppressed)
                 .bind(ids)
@@ -566,8 +648,8 @@ impl MemoryService {
                 .await
                 .map_err(db)?
         } else if pattern.is_empty() {
-            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.confidence,r.occurred_at,r.observed_at,r.valid_from,r.valid_to,r.supersession_state FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR o.status='active') ORDER BY r.observed_at DESC LIMIT 512")
-                .bind(query.subject.0).bind(query.constraints.include_suppressed).fetch_all(self.store.pool()).await.map_err(db)?
+            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.confidence,r.occurred_at,r.observed_at,r.valid_from,r.valid_to,r.supersession_state FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR o.status='active') ORDER BY r.observed_at DESC LIMIT $3")
+                .bind(query.subject.0).bind(query.constraints.include_suppressed).bind(plan.candidate_limit as i64).fetch_all(self.store.pool()).await.map_err(db)?
         } else if snapshot.lexical.is_some() && !query.constraints.include_suppressed {
             Vec::new()
         } else {
@@ -576,12 +658,12 @@ impl MemoryService {
                 .take(16)
                 .map(|term| format!("%{}%", term.replace('%', "")))
                 .collect::<Vec<_>>();
-            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.confidence,r.occurred_at,r.observed_at,r.valid_from,r.valid_to,r.supersession_state FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR o.status='active') AND r.representation_text ILIKE ANY($3) ORDER BY r.observed_at DESC LIMIT 512")
-                .bind(query.subject.0).bind(query.constraints.include_suppressed).bind(&terms).fetch_all(self.store.pool()).await.map_err(db)?
+            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.confidence,r.occurred_at,r.observed_at,r.valid_from,r.valid_to,r.supersession_state FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR o.status='active') AND r.representation_text ILIKE ANY($3) ORDER BY r.observed_at DESC LIMIT $4")
+                .bind(query.subject.0).bind(query.constraints.include_suppressed).bind(&terms).bind(plan.candidate_limit as i64).fetch_all(self.store.pool()).await.map_err(db)?
         };
         let mut rank_inputs = Vec::new();
         let mut views = Vec::new();
-        for (index, row) in rows.into_iter().enumerate() {
+        for row in rows {
             if !target_allows_memory {
                 continue;
             }
@@ -609,8 +691,6 @@ impl MemoryService {
             }
             let memory_id = MemoryId(row.try_get("memory_id").map_err(db)?);
             let revision = MemoryRevisionId(row.try_get("current_revision_id").map_err(db)?);
-            let revision_tags = self.revision_tags(revision.0).await?;
-            let revision_anchors = self.revision_anchors(revision.0).await?;
             if query
                 .constraints
                 .authority
@@ -678,20 +758,24 @@ impl MemoryService {
             }
             let reference = CognitiveRef::Memory(memory_id);
             let representation: String = row.try_get("representation_text").map_err(db)?;
-            let exact = exact_refs.contains(&reference)
+            let exact = candidates.is_exact(&reference)
+                || candidates.is_exact(&CognitiveRef::MemoryRevision(revision))
+                || exact_refs.contains(&reference)
                 || exact_refs.contains(&CognitiveRef::MemoryRevision(revision));
             let runtime = resident_refs.contains(&format!("memory:{}", memory_id.0))
                 || resident_refs.contains(&format!("memory_revision:{}", revision.0));
-            let lexical = lexical_ranks.contains_key(&reference)
-                || (!pattern.is_empty()
-                    && pattern
-                        .split_whitespace()
-                        .all(|term| representation.to_lowercase().contains(&term.to_lowercase())));
-            let entity = if entity_cues.is_empty() {
-                false
-            } else {
-                self.memory_has_entities(revision.0, &entity_cues).await?
-            };
+            let lexical_hit = lexical_ranks.contains_key(&reference);
+            let substring_fallback = !lexical_hit
+                && (snapshot.lexical.is_none() || query.constraints.include_suppressed)
+                && !pattern.is_empty()
+                && pattern
+                    .split_whitespace()
+                    .all(|term| representation.to_lowercase().contains(&term.to_lowercase()));
+            let lane_variants = candidates
+                .posting_hits(&reference)
+                .map(|lanes| lanes.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let entity = lane_variants.iter().any(|lane| lane == "entity_posting");
             let required_entity = if required_entities.is_empty() {
                 true
             } else {
@@ -708,33 +792,48 @@ impl MemoryService {
             if runtime {
                 family_ranks.insert(EvidenceFamily::Runtime, 1);
             }
-            if lexical {
+            if lexical_hit {
                 family_ranks.insert(
                     EvidenceFamily::Lexical,
-                    lexical_ranks.get(&reference).copied().unwrap_or(index + 1),
+                    lexical_ranks.get(&reference).copied().unwrap_or(1),
                 );
             }
+            let mut variants = candidates
+                .dense_variant_set(&reference)
+                .map(|variants| {
+                    let mut variants = variants.iter().cloned().collect::<Vec<_>>();
+                    variants.sort();
+                    variants
+                })
+                .unwrap_or_default();
+            if substring_fallback {
+                variants.push("substring_fallback".into());
+            }
+            variants.extend(lane_variants);
             if let Some(rank) = dense_ranks.get(&reference) {
                 family_ranks.insert(EvidenceFamily::SemanticDense, *rank);
             }
             if entity {
-                family_ranks.insert(EvidenceFamily::Entity, index + 1);
+                family_ranks.insert(EvidenceFamily::Entity, 1);
             }
             if !temporal_cues.is_empty()
                 || query.constraints.occurred.is_some()
                 || query.constraints.observed.is_some()
                 || query.constraints.valid.is_some()
             {
-                family_ranks.insert(EvidenceFamily::Temporal, index + 1);
+                family_ranks.insert(EvidenceFamily::Temporal, 1);
             }
-            if tag_cues.iter().any(|tag| revision_tags.contains(tag)) {
-                family_ranks.insert(EvidenceFamily::TagDirect, index + 1);
-            }
-            if anchor_cues
-                .iter()
-                .any(|anchor| revision_anchors.contains(anchor))
+            if candidates
+                .posting_hits(&reference)
+                .is_some_and(|hits| hits.contains("tag_posting"))
             {
-                family_ranks.insert(EvidenceFamily::AnchorDirect, index + 1);
+                family_ranks.insert(EvidenceFamily::TagDirect, 1);
+            }
+            if candidates
+                .posting_hits(&reference)
+                .is_some_and(|hits| hits.contains("anchor_posting"))
+            {
+                family_ranks.insert(EvidenceFamily::AnchorDirect, 1);
             }
             let trail = CandidateSemanticTrail {
                 memory: reference.clone(),
@@ -747,114 +846,52 @@ impl MemoryService {
                 family_ranks,
                 topology: CandidateTopologyObservation::default(),
                 trail: Some(trail),
-                variants: dense_variants
-                    .get(&reference)
-                    .map(|variants| {
-                        let mut variants = variants.iter().cloned().collect::<Vec<_>>();
-                        variants.sort();
-                        variants
-                    })
-                    .unwrap_or_default(),
+                variants,
             });
             views.push((reference, memory_id, revision, row));
         }
-        let observability = if let Some(wave) = &snapshot.wave {
-            let seeds = wave_seeds(
-                wave,
-                &query,
-                &tag_cues,
-                &entity_cues,
-                &anchor_cues,
-                &exact_refs,
-            );
-            if seeds.is_empty() {
-                0.0
-            } else {
-                let river = propagate(wave, &seeds);
-                let local = bounded_restart_field(
-                    wave,
-                    &river.source_field,
-                    wave.config.local_alpha,
-                    wave.config.local_iterations,
-                );
-                let transfer = bounded_restart_field(
-                    wave,
-                    &river.source_field,
-                    wave.config.transfer_alpha,
-                    wave.config.transfer_iterations,
-                );
-                if let Some(output) = &query_embedding {
-                    for (variant, field) in [
-                        ("local_field_dense", &local),
-                        ("transfer_field_dense", &transfer),
-                    ] {
-                        for generation in &snapshot.dense {
-                            if !generation.space.compatible_with(&output.space) {
-                                continue;
-                            }
-                            let Some(vector) = field_vector(wave, field, generation) else {
-                                continue;
-                            };
-                            for (rank, item) in
-                                generation.search(&vector, 64)?.into_iter().enumerate()
-                            {
-                                if let Some(record) = item.record
-                                    && matches!(record.reference, CognitiveRef::Memory(_))
-                                {
-                                    dense_ranks
-                                        .entry(record.reference.clone())
-                                        .or_insert(rank + 1);
-                                    dense_variants
-                                        .entry(record.reference)
-                                        .or_default()
-                                        .insert(variant.into());
-                                }
-                            }
-                        }
+        let observability = if let Some((river, local, transfer, wave)) = &topology_state {
+            for candidate in &mut rank_inputs {
+                if let CognitiveRef::Memory(_) = &candidate.reference
+                    && let Some((_, _, revision, _)) = views
+                        .iter()
+                        .find(|(reference, _, _, _)| reference == &candidate.reference)
+                {
+                    let trail = self
+                        .candidate_trail(revision.0, candidate.reference.clone(), wave)
+                        .await?;
+                    candidate.topology = trail_topology_observation(
+                        &trail,
+                        &river.source_field,
+                        local,
+                        transfer,
+                        river,
+                    );
+                    if candidate.topology.field_contact > 0.0 {
+                        candidate.family_ranks.insert(EvidenceFamily::WaveField, 1);
                     }
-                }
-                for candidate in &mut rank_inputs {
-                    if let CognitiveRef::Memory(_) = &candidate.reference
-                        && let Some((_, _, revision, _)) = views
-                            .iter()
-                            .find(|(reference, _, _, _)| reference == &candidate.reference)
-                    {
-                        let trail = self
-                            .candidate_trail(revision.0, candidate.reference.clone(), wave)
-                            .await?;
-                        candidate.topology = trail_topology_observation(
-                            &trail,
-                            &river.source_field,
-                            &local,
-                            &transfer,
-                            &river,
-                        );
-                        if candidate.topology.field_contact > 0.0 {
-                            candidate.family_ranks.insert(EvidenceFamily::WaveField, 1);
-                        }
-                        candidate.trail = Some(trail);
-                    } else if let Some(node) = wave.node_id(&candidate.reference) {
-                        let trail = CandidateSemanticTrail {
-                            memory: candidate.reference.clone(),
-                            nodes: vec![node],
-                            order: TrailOrder::Unordered,
-                            provenance: Some("current Wave node projection".into()),
-                        };
-                        candidate.topology = trail_topology_observation(
-                            &trail,
-                            &river.source_field,
-                            &local,
-                            &transfer,
-                            &river,
-                        );
-                        if candidate.topology.field_contact > 0.0 {
-                            candidate.family_ranks.insert(EvidenceFamily::WaveField, 1);
-                        }
-                        candidate.trail = Some(trail);
+                    candidate.trail = Some(trail);
+                } else if let Some(node) = wave.node_id(&candidate.reference) {
+                    let trail = CandidateSemanticTrail {
+                        memory: candidate.reference.clone(),
+                        nodes: vec![node],
+                        order: TrailOrder::Unordered,
+                        provenance: Some("current Wave node projection".into()),
+                    };
+                    candidate.topology = trail_topology_observation(
+                        &trail,
+                        &river.source_field,
+                        local,
+                        transfer,
+                        river,
+                    );
+                    if candidate.topology.field_contact > 0.0 {
+                        candidate.family_ranks.insert(EvidenceFamily::WaveField, 1);
                     }
+                    candidate.trail = Some(trail);
                 }
-                wave_observability(&river).omega
             }
+            wave_observability(river).omega
         } else {
             0.0
         };
@@ -866,18 +903,22 @@ impl MemoryService {
             }
         }
         let ranked = rank_candidates(&rank_inputs, observability);
-        let (mut results, mut result_references) =
-            self.project_memory_results(&query, ranked, &views).await?;
+        let (mut results, mut result_references) = self
+            .project_memory_results(&query, ranked, &views, plan.materialize_evidence)
+            .await?;
         self.append_evidence_results(
             &query,
-            &lexical_ranks,
+            &candidates,
             resident_occurrences,
             &mut results,
             &mut result_references,
+            plan.materialize_evidence,
         )
         .await?;
-        let (resource_actions, resource_degradation) =
-            self.cognition.resource_actions_for_query(&query).await?;
+        let (resource_actions, resource_degradation) = self
+            .cognition
+            .resource_actions_for_query(&query, plan)
+            .await?;
         degradation.extend(resource_degradation);
         let status = if degradation.is_empty() {
             QueryStatus::Complete
@@ -907,40 +948,74 @@ impl MemoryService {
             results,
             resource_actions,
             degradation,
-            diagnostics: (query.diagnostics != DiagnosticsRequest::None).then_some(
+            diagnostics: (query.diagnostics != DiagnosticsRequest::None).then_some({
+                let mut candidate_counts = BTreeMap::from([
+                    ("structured".into(), rank_inputs.len()),
+                    ("lexical".into(), lexical_ranks.len()),
+                    ("dense".into(), dense_ranks.len()),
+                    ("all_lanes".into(), candidates.candidate_refs().count()),
+                    (
+                        "field_dense".into(),
+                        dense_variants
+                            .values()
+                            .filter(|variants| {
+                                variants.contains("local_field_dense")
+                                    || variants.contains("transfer_field_dense")
+                            })
+                            .count(),
+                    ),
+                ]);
+                let lane_status = BTreeMap::from([
+                    (
+                        "epa".into(),
+                        if epa_trace.is_some() {
+                            "ready"
+                        } else {
+                            "unavailable"
+                        }
+                        .into(),
+                    ),
+                    (
+                        "residual".into(),
+                        if residual_trace.is_some() {
+                            "ready"
+                        } else {
+                            "unavailable"
+                        }
+                        .into(),
+                    ),
+                    (
+                        "cue_sensing_executed".into(),
+                        if plan.sense_cues && residual_trace.is_some() {
+                            "yes"
+                        } else {
+                            "no"
+                        }
+                        .into(),
+                    ),
+                    (
+                        "topology_executed".into(),
+                        if topology_state.is_some() {
+                            "yes"
+                        } else {
+                            "no"
+                        }
+                        .into(),
+                    ),
+                ]);
+                if topology_state.is_some() {
+                    candidate_counts.insert("topology_budget".into(), plan.topology_nodes);
+                }
                 QueryDiagnostics {
-                    candidate_counts: BTreeMap::from([
-                        ("structured".into(), rank_inputs.len()),
-                        ("lexical".into(), lexical_ranks.len()),
-                        ("dense".into(), dense_ranks.len()),
-                    ]),
-                    lane_status: BTreeMap::from([
-                        (
-                            "epa".into(),
-                            if epa_trace.is_some() {
-                                "ready"
-                            } else {
-                                "unavailable"
-                            }
-                            .into(),
-                        ),
-                        (
-                            "residual".into(),
-                            if residual_trace.is_some() {
-                                "ready"
-                            } else {
-                                "unavailable"
-                            }
-                            .into(),
-                        ),
-                    ]),
+                    candidate_counts,
+                    lane_status,
                     wave_observability: Some(observability),
                     trace: Some(serde_json::json!({
                         "epa": epa_trace,
                         "residual": residual_trace,
                     })),
-                },
-            ),
+                }
+            }),
         })
     }
 }
@@ -950,8 +1025,8 @@ impl nous_cognitive_runtime::CognitiveContributor for MemoryService {
     async fn contribute(
         &self,
         query: &CognitiveQuery,
-        _plan: &nous_cognitive_runtime::QueryPlan,
+        plan: &nous_cognitive_runtime::QueryPlan,
     ) -> Result<CognitiveQueryResult> {
-        self.query(query.clone()).await
+        self.query_with_plan(query.clone(), plan).await
     }
 }

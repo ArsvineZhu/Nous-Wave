@@ -138,14 +138,20 @@ impl NousRuntime {
     }
 
     pub async fn query(&self, query: CognitiveQuery) -> Result<CognitiveQueryResult> {
-        let projection = self.serving.refresh(query.subject).await?;
+        query.validate()?;
+        let plan = nous_cognitive_runtime::QueryPlan::for_query(&query);
+        let projection = self
+            .serving
+            .prepare(query.subject, plan.serving_need(&query))
+            .await?;
         let mut result = self
             .cognition
-            .query(
+            .query_with_plan(
                 query,
                 self.memory
                     .as_ref()
                     .map(|memory| memory as &dyn nous_cognitive_runtime::CognitiveContributor),
+                plan,
             )
             .await?;
         result.degradation.extend(projection.degradation);

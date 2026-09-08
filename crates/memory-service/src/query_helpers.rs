@@ -1,6 +1,103 @@
 use super::*;
 use std::collections::HashSet;
 
+#[derive(Debug, Default)]
+pub(super) struct CandidateAccumulator {
+    references: HashMap<CognitiveRef, CandidateLaneEvidence>,
+}
+
+#[derive(Debug, Default)]
+struct CandidateLaneEvidence {
+    lexical: Option<usize>,
+    dense: Option<usize>,
+    dense_variants: HashSet<String>,
+    postings: HashSet<String>,
+    exact: bool,
+    runtime: bool,
+}
+
+impl CandidateAccumulator {
+    pub(super) fn add_lexical(&mut self, reference: CognitiveRef, rank: usize) {
+        let entry = self.references.entry(reference).or_default();
+        entry.lexical = Some(entry.lexical.map_or(rank, |current| current.min(rank)));
+    }
+
+    pub(super) fn add_dense(
+        &mut self,
+        reference: CognitiveRef,
+        rank: usize,
+        variant: impl Into<String>,
+    ) {
+        let entry = self.references.entry(reference).or_default();
+        entry.dense = Some(entry.dense.map_or(rank, |current| current.min(rank)));
+        entry.dense_variants.insert(variant.into());
+    }
+
+    pub(super) fn add_posting(&mut self, reference: CognitiveRef, lane: impl Into<String>) {
+        self.references
+            .entry(reference)
+            .or_default()
+            .postings
+            .insert(lane.into());
+    }
+
+    pub(super) fn mark_exact(&mut self, reference: CognitiveRef) {
+        self.references.entry(reference).or_default().exact = true;
+    }
+
+    pub(super) fn mark_runtime(&mut self, reference: CognitiveRef) {
+        self.references.entry(reference).or_default().runtime = true;
+    }
+
+    pub(super) fn is_exact(&self, reference: &CognitiveRef) -> bool {
+        self.references
+            .get(reference)
+            .is_some_and(|evidence| evidence.exact)
+    }
+
+    pub(super) fn candidate_refs(&self) -> impl Iterator<Item = &CognitiveRef> {
+        self.references.keys()
+    }
+
+    pub(super) fn lexical_ranks(&self) -> HashMap<CognitiveRef, usize> {
+        self.references
+            .iter()
+            .filter_map(|(reference, evidence)| {
+                evidence.lexical.map(|rank| (reference.clone(), rank))
+            })
+            .collect()
+    }
+
+    pub(super) fn dense_ranks(&self) -> HashMap<CognitiveRef, usize> {
+        self.references
+            .iter()
+            .filter_map(|(reference, evidence)| {
+                evidence.dense.map(|rank| (reference.clone(), rank))
+            })
+            .collect()
+    }
+
+    pub(super) fn dense_variants(&self) -> HashMap<CognitiveRef, HashSet<String>> {
+        self.references
+            .iter()
+            .filter(|(_, evidence)| !evidence.dense_variants.is_empty())
+            .map(|(reference, evidence)| (reference.clone(), evidence.dense_variants.clone()))
+            .collect()
+    }
+
+    pub(super) fn posting_hits(&self, reference: &CognitiveRef) -> Option<&HashSet<String>> {
+        self.references
+            .get(reference)
+            .map(|evidence| &evidence.postings)
+    }
+
+    pub(super) fn dense_variant_set(&self, reference: &CognitiveRef) -> Option<&HashSet<String>> {
+        self.references
+            .get(reference)
+            .map(|evidence| &evidence.dense_variants)
+    }
+}
+
 pub(super) fn field_vector(
     wave: &WaveGraphGeneration,
     field: &std::collections::BTreeMap<u32, f64>,
@@ -129,40 +226,45 @@ pub(super) fn wave_seeds(
     entity_cues: &[EntityRef],
     anchor_cues: &[AnchorId],
     exact_refs: &HashSet<CognitiveRef>,
-) -> Vec<SourceSeed> {
+    residual_seeds: &[(CognitiveRef, f64)],
+    embedding_space: Option<&str>,
+) -> Vec<WeightedCognitiveSeed> {
     let mut seeds = tag_cues
         .iter()
         .filter_map(|tag| wave.node_id(&CognitiveRef::Tag(*tag)))
-        .map(|node| SourceSeed {
+        .map(|node| WeightedCognitiveSeed {
             node,
             weight: 1.0,
-            seed_family: "tag".into(),
-            origin_cue: "query".into(),
-            hop_zero: true,
+            family: SeedFamily::Tag,
+            origin: SeedOrigin::TagCue,
+            provenance: Some("explicit tag cue".into()),
+            embedding_space: None,
         })
         .collect::<Vec<_>>();
     seeds.extend(
         entity_cues
             .iter()
             .filter_map(|entity| wave.node_id(&CognitiveRef::Entity(entity.clone())))
-            .map(|node| SourceSeed {
+            .map(|node| WeightedCognitiveSeed {
                 node,
                 weight: 1.0,
-                seed_family: "entity".into(),
-                origin_cue: "query".into(),
-                hop_zero: true,
+                family: SeedFamily::Entity,
+                origin: SeedOrigin::EntityCue,
+                provenance: Some("explicit entity cue".into()),
+                embedding_space: None,
             }),
     );
     seeds.extend(
         anchor_cues
             .iter()
             .filter_map(|anchor| wave.node_id(&CognitiveRef::Anchor(*anchor)))
-            .map(|node| SourceSeed {
+            .map(|node| WeightedCognitiveSeed {
                 node,
                 weight: 1.0,
-                seed_family: "anchor".into(),
-                origin_cue: "query".into(),
-                hop_zero: true,
+                family: SeedFamily::Anchor,
+                origin: SeedOrigin::AnchorCue,
+                provenance: Some("explicit anchor cue".into()),
+                embedding_space: None,
             }),
     );
     for reference in query
@@ -175,12 +277,13 @@ pub(super) fn wave_seeds(
         }))
     {
         if let Some(node) = wave.node_id(reference) {
-            seeds.push(SourceSeed {
+            seeds.push(WeightedCognitiveSeed {
                 node,
                 weight: 1.0,
-                seed_family: "situation".into(),
-                origin_cue: reference.to_string(),
-                hop_zero: true,
+                family: SeedFamily::Runtime,
+                origin: SeedOrigin::RuntimeSituation,
+                provenance: Some(reference.to_string()),
+                embedding_space: None,
             });
         }
     }
@@ -189,12 +292,13 @@ pub(super) fn wave_seeds(
         _ => None,
     }) {
         if let Some(node) = wave.node_id(reference) {
-            seeds.push(SourceSeed {
+            seeds.push(WeightedCognitiveSeed {
                 node,
                 weight: 1.0,
-                seed_family: "relation".into(),
-                origin_cue: reference.to_string(),
-                hop_zero: true,
+                family: SeedFamily::Relation,
+                origin: SeedOrigin::RelationCue,
+                provenance: Some(reference.to_string()),
+                embedding_space: None,
             });
         }
     }
@@ -203,25 +307,61 @@ pub(super) fn wave_seeds(
         _ => None,
     }) {
         if let Some(node) = wave.node_id(&CognitiveRef::Resource(resource.clone())) {
-            seeds.push(SourceSeed {
+            seeds.push(WeightedCognitiveSeed {
                 node,
                 weight: 1.0,
-                seed_family: "resource".into(),
-                origin_cue: resource.as_str().into(),
-                hop_zero: true,
+                family: SeedFamily::Resource,
+                origin: SeedOrigin::ResourceCue,
+                provenance: Some(resource.as_str().into()),
+                embedding_space: None,
             });
         }
     }
     for reference in exact_refs {
         if let Some(node) = wave.node_id(reference) {
-            seeds.push(SourceSeed {
+            seeds.push(WeightedCognitiveSeed {
                 node,
                 weight: 1.0,
-                seed_family: "exact".into(),
-                origin_cue: reference.to_string(),
-                hop_zero: true,
+                family: SeedFamily::Exact,
+                origin: SeedOrigin::ExactTarget,
+                provenance: Some(reference.to_string()),
+                embedding_space: None,
+            });
+        }
+    }
+    for (reference, weight) in residual_seeds {
+        if let Some(node) = wave.node_id(reference) {
+            seeds.push(WeightedCognitiveSeed {
+                node,
+                weight: *weight,
+                family: SeedFamily::Residual,
+                origin: SeedOrigin::ResidualDiscovery,
+                provenance: Some(format!("residual:{reference}")),
+                embedding_space: embedding_space.map(str::to_owned),
             });
         }
     }
     seeds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn substring_fallback_never_claims_lexical_family() {
+        let reference = CognitiveRef::Memory(MemoryId::new());
+        let mut candidates = CandidateAccumulator::default();
+        candidates.add_dense(reference.clone(), 1, "substring_fallback");
+        candidates.add_dense(reference.clone(), 1, "direct_dense");
+        assert!(!candidates.lexical_ranks().contains_key(&reference));
+        assert!(candidates.dense_ranks().contains_key(&reference));
+        assert!(
+            candidates
+                .dense_variant_set(&reference)
+                .is_some_and(|variants| {
+                    variants.contains("substring_fallback") && variants.contains("direct_dense")
+                })
+        );
+    }
 }

@@ -1,12 +1,14 @@
 use chrono::Utc;
+use nous_authority_store::ProjectionInvalidation;
 use nous_cognitive_runtime::{
-    ConsumerProfile, ContextBudget, MaterializationPolicy, UseKind, WorkingSetRequest,
+    ConsumerProfile, ContextBudget, MaterializationPolicy, ResourceUpsert, UseKind,
+    WorkingSetRequest,
 };
 use nous_cognitive_runtime::{UseFeedback, UseFeedbackEvent};
 use nous_core::{
     API_VERSION, CapabilityOperation, CognitiveQuery, CognitiveRef, Cue, EmbeddingSpaceSignature,
-    EntityCue, EntityRef, Modality, ProducerSignature, RepresentationKind, SourceClass, TagCue,
-    TextCue,
+    EntityCue, EntityRef, Modality, ProducerSignature, RepresentationKind, ServingNeed,
+    SourceClass, TagCue, TextCue,
 };
 use nous_material::{
     FormationDirective, ObservationInput, ObservationMaterial, OccurrenceDescriptor,
@@ -108,9 +110,13 @@ impl TextEmbeddingProvider for TestEmbedder {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "integration scenario proves derivation, dense evidence visibility, and target isolation together"
+)]
 async fn derivation_claim_and_provider_commit_preserve_textual_surrogate() {
     let (postgres, url, root) = database().await;
-    let runtime = open_runtime(&url, &root, true, None).await;
+    let runtime = open_runtime(&url, &root, true, Some(Arc::new(TestEmbedder))).await;
     let subject = runtime
         .subjects
         .create_subject(seed_input())
@@ -189,7 +195,10 @@ async fn derivation_claim_and_provider_commit_preserve_textual_surrogate() {
             resources: Default::default(),
             result_need: Default::default(),
             effort: Default::default(),
-            capabilities: Default::default(),
+            capabilities: nous_core::CapabilityPolicy {
+                text_embedding: nous_core::RequirementStrength::Required,
+                ..Default::default()
+            },
             diagnostics: Default::default(),
         })
         .await
@@ -200,6 +209,36 @@ async fn derivation_claim_and_provider_commit_preserve_textual_surrogate() {
             nous_core::CognitiveRef::DerivedRepresentation(_)
         )
     }));
+    assert!(
+        result
+            .results
+            .iter()
+            .all(|hit| !matches!(hit.reference, nous_core::CognitiveRef::Memory(_)))
+    );
+    let memory_result = runtime
+        .query(CognitiveQuery {
+            api_version: API_VERSION,
+            subject,
+            session: None,
+            situation: Default::default(),
+            targets: vec![nous_core::QueryTarget::Memory],
+            cues: vec![Cue::Text(TextCue {
+                text: "persisted extracted surrogate".into(),
+            })],
+            constraints: Default::default(),
+            exploration: Default::default(),
+            resources: Default::default(),
+            result_need: Default::default(),
+            effort: Default::default(),
+            capabilities: Default::default(),
+            diagnostics: Default::default(),
+        })
+        .await
+        .expect("memory-only evidence query");
+    assert!(memory_result.results.iter().all(|hit| !matches!(
+        hit.reference,
+        nous_core::CognitiveRef::DerivedRepresentation(_)
+    )));
 
     runtime.store.close().await;
     postgres.stop().await.expect("stop PostgreSQL");
@@ -569,6 +608,205 @@ async fn query_uses_rebuilt_entity_tag_and_lexical_projections() {
     postgres.stop().await.expect("stop PostgreSQL");
 }
 
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "integration scenario builds a bounded dense corpus and proves field-dense admission"
+)]
+async fn field_dense_only_candidate_enters_final_results() {
+    let (postgres, url, root) = database().await;
+    let runtime = open_runtime(&url, &root, true, Some(Arc::new(TestEmbedder))).await;
+    let subject = runtime
+        .subjects
+        .create_subject(seed_input())
+        .await
+        .expect("subject")
+        .subject_id;
+    let observed = runtime
+        .observe(ObservationInput {
+            subject,
+            session: None,
+            occurrence: OccurrenceDescriptor {
+                source_class: SourceClass::Message,
+                external_object_ref: None,
+                occurred_at: None,
+                observed_at: Utc::now(),
+                conversation_ref: None,
+                actor_entity_ref: None,
+                context: serde_json::json!({}),
+            },
+            material: ObservationMaterial::InlineText {
+                text: "witness document".into(),
+                media_type: "text/plain".into(),
+            },
+            entities: Vec::new(),
+            formation: FormationDirective::None,
+            runtime: RuntimeDirective::default(),
+        })
+        .await
+        .expect("observation");
+    let tag = runtime
+        .require_memory()
+        .expect("memory")
+        .create_tag(
+            subject,
+            nous_memory_service::CreateTagRequest {
+                label: "cluster-zero".into(),
+                description: None,
+                kind_hint: None,
+                origin: "explicit".into(),
+            },
+        )
+        .await
+        .expect("tag");
+    let candidate = runtime
+        .require_memory()
+        .expect("memory")
+        .form_memory(ExplicitMemoryInput {
+            subject,
+            memory_class: MemoryClass::Specific,
+            semantic_role: "candidate".into(),
+            representation_text: "topic alpha".into(),
+            title: None,
+            evidence: vec![MemoryRevisionEvidence {
+                evidence_no: 0,
+                evidence: EvidenceRef::Occurrence {
+                    occurrence_id: observed.occurrence.occurrence_id,
+                },
+                support_role: SupportRole::Direct,
+                weight: Some(1.0),
+            }],
+            entity_refs: Vec::new(),
+            tags: vec![tag.tag_id],
+            occurred_at: None,
+            observed_at: Utc::now(),
+            valid_from: None,
+            valid_to: None,
+            epistemic_class: nous_core::EpistemicClass::Reported,
+            confidence: None,
+        })
+        .await
+        .expect("candidate memory");
+    for _ in 0..120 {
+        runtime
+            .require_memory()
+            .expect("memory")
+            .form_memory(ExplicitMemoryInput {
+                subject,
+                memory_class: MemoryClass::Specific,
+                semantic_role: "noise".into(),
+                representation_text: "tag-1".into(),
+                title: None,
+                evidence: vec![MemoryRevisionEvidence {
+                    evidence_no: 0,
+                    evidence: EvidenceRef::Occurrence {
+                        occurrence_id: observed.occurrence.occurrence_id,
+                    },
+                    support_role: SupportRole::Direct,
+                    weight: Some(1.0),
+                }],
+                entity_refs: Vec::new(),
+                tags: Vec::new(),
+                occurred_at: None,
+                observed_at: Utc::now(),
+                valid_from: None,
+                valid_to: None,
+                epistemic_class: nous_core::EpistemicClass::Reported,
+                confidence: None,
+            })
+            .await
+            .expect("noise memory");
+    }
+    let result = runtime
+        .query(CognitiveQuery {
+            api_version: API_VERSION,
+            subject,
+            session: None,
+            situation: Default::default(),
+            targets: vec![nous_core::QueryTarget::Memory],
+            cues: vec![
+                Cue::Text(TextCue {
+                    text: "tag-0".into(),
+                }),
+                Cue::Tag(TagCue { tag: tag.tag_id }),
+            ],
+            constraints: Default::default(),
+            exploration: Default::default(),
+            resources: Default::default(),
+            result_need: nous_core::ResultNeed {
+                limit: 32,
+                need_evidence: true,
+                need_materialization_handles: false,
+            },
+            effort: nous_core::CognitiveEffort::Light,
+            capabilities: Default::default(),
+            diagnostics: nous_core::DiagnosticsRequest::Full,
+        })
+        .await
+        .expect("field dense query");
+    let hit = result
+        .results
+        .iter()
+        .find(|hit| hit.reference == CognitiveRef::Memory(candidate.object.memory_id))
+        .expect("candidate entered final results");
+    assert!(
+        hit.match_evidence
+            .variants
+            .contains(&"local_field_dense".into())
+            || hit
+                .match_evidence
+                .variants
+                .contains(&"transfer_field_dense".into())
+    );
+    assert!(!hit.match_evidence.variants.contains(&"direct_dense".into()));
+    assert!(
+        result
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.candidate_counts.get("field_dense") >= Some(&1))
+    );
+    let light_work = result
+        .diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.candidate_counts.get("all_lanes").copied())
+        .expect("light work count");
+    let maximum = runtime
+        .query(CognitiveQuery {
+            api_version: API_VERSION,
+            subject,
+            session: None,
+            situation: Default::default(),
+            targets: vec![nous_core::QueryTarget::Memory],
+            cues: vec![
+                Cue::Text(TextCue {
+                    text: "tag-0".into(),
+                }),
+                Cue::Tag(TagCue { tag: tag.tag_id }),
+            ],
+            constraints: Default::default(),
+            exploration: Default::default(),
+            resources: Default::default(),
+            result_need: nous_core::ResultNeed {
+                limit: 32,
+                need_evidence: true,
+                need_materialization_handles: false,
+            },
+            effort: nous_core::CognitiveEffort::Maximum,
+            capabilities: Default::default(),
+            diagnostics: nous_core::DiagnosticsRequest::Full,
+        })
+        .await
+        .expect("maximum query");
+    let maximum_work = maximum
+        .diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.candidate_counts.get("all_lanes").copied())
+        .expect("maximum work count");
+    assert!(maximum_work > light_work);
+    runtime.store.close().await;
+    postgres.stop().await.expect("stop PostgreSQL");
+}
+
 struct FailingEmbedder;
 
 #[async_trait::async_trait]
@@ -856,6 +1094,272 @@ async fn observation_admission_survives_embedding_failure() {
         .expect("session view");
     assert!(session.resident.iter().any(|resident| resident.reference
         == CognitiveRef::Occurrence(observed.occurrence.occurrence_id)));
+    runtime.store.close().await;
+    postgres.stop().await.expect("stop PostgreSQL");
+}
+
+#[tokio::test]
+async fn resource_delete_is_subject_scoped() {
+    let (postgres, url, root) = database().await;
+    let runtime = open_runtime(&url, &root, false, None).await;
+    let subject_a = runtime
+        .subjects
+        .create_subject(seed_input())
+        .await
+        .expect("subject A")
+        .subject_id;
+    let subject_b = runtime
+        .subjects
+        .create_subject(seed_input())
+        .await
+        .expect("subject B")
+        .subject_id;
+    let resource = nous_core::ResourceRef::new("resource:shared:same").expect("resource");
+    let input = ResourceUpsert {
+        resource_ref: resource.clone(),
+        display_label: Some("shared".into()),
+        authority_class: "external".into(),
+        coverage: serde_json::json!({}),
+        query_dimensions: serde_json::json!({}),
+        modalities: serde_json::json!([]),
+        freshness_policy: serde_json::json!({}),
+        access_cost_class: "low".into(),
+        resolver_key: "mock".into(),
+        readiness: "ready".into(),
+    };
+    runtime
+        .cognition
+        .upsert_resource(subject_a, input.clone())
+        .await
+        .expect("upsert A");
+    runtime
+        .cognition
+        .upsert_resource(subject_b, input)
+        .await
+        .expect("upsert B");
+    let session_a = runtime
+        .cognition
+        .open_session(subject_a, serde_json::json!({}))
+        .await
+        .expect("session A")
+        .session_id;
+    let session_b = runtime
+        .cognition
+        .open_session(subject_b, serde_json::json!({}))
+        .await
+        .expect("session B")
+        .session_id;
+    runtime
+        .cognition
+        .admit(
+            session_a,
+            CognitiveRef::Resource(resource.clone()),
+            "test",
+            None,
+        )
+        .await
+        .expect("admit A");
+    runtime
+        .cognition
+        .admit(
+            session_b,
+            CognitiveRef::Resource(resource.clone()),
+            "test",
+            None,
+        )
+        .await
+        .expect("admit B");
+
+    runtime
+        .cognition
+        .delete_resource(subject_a, resource.clone())
+        .await
+        .expect("delete A");
+    let view_a = runtime
+        .cognition
+        .session(subject_a, session_a)
+        .await
+        .expect("view A");
+    let view_b = runtime
+        .cognition
+        .session(subject_b, session_b)
+        .await
+        .expect("view B");
+    assert!(
+        !view_a
+            .resident
+            .iter()
+            .any(|item| item.reference == CognitiveRef::Resource(resource.clone()))
+    );
+    assert!(
+        view_b
+            .resident
+            .iter()
+            .any(|item| item.reference == CognitiveRef::Resource(resource.clone()))
+    );
+    assert_eq!(
+        runtime
+            .cognition
+            .list_resources(subject_a)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        runtime
+            .cognition
+            .list_resources(subject_b)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    runtime.store.close().await;
+    postgres.stop().await.expect("stop PostgreSQL");
+}
+
+#[tokio::test]
+async fn projection_invalidation_commits_and_rolls_back_atomically() {
+    let (postgres, url, root) = database().await;
+    let runtime = open_runtime(&url, &root, false, None).await;
+    let subject = runtime
+        .subjects
+        .create_subject(seed_input())
+        .await
+        .expect("subject")
+        .subject_id;
+    let before: i64 = sqlx::query_scalar("SELECT state_revision FROM subjects WHERE subject_id=$1")
+        .bind(subject.0)
+        .fetch_one(runtime.store.pool())
+        .await
+        .expect("state before");
+    let mut tx = runtime.store.begin().await.expect("tx");
+    sqlx::query("UPDATE subjects SET metadata=$2 WHERE subject_id=$1")
+        .bind(subject.0)
+        .bind(serde_json::json!({"atomic":true}))
+        .execute(&mut *tx)
+        .await
+        .expect("authority write");
+    nous_authority_store::AuthorityStore::invalidate_in(
+        &mut tx,
+        subject,
+        ProjectionInvalidation::text(),
+    )
+    .await
+    .expect("invalidate in tx");
+    tx.commit().await.expect("commit");
+    let after_commit: i64 =
+        sqlx::query_scalar("SELECT state_revision FROM subjects WHERE subject_id=$1")
+            .bind(subject.0)
+            .fetch_one(runtime.store.pool())
+            .await
+            .expect("state after");
+    assert!(after_commit > before);
+    assert!(
+        runtime
+            .store
+            .projection_watermark(subject, "lexical", "")
+            .await
+            .expect("watermark")
+            > 0
+    );
+
+    let mut tx = runtime.store.begin().await.expect("rollback tx");
+    nous_authority_store::AuthorityStore::invalidate_in(
+        &mut tx,
+        subject,
+        ProjectionInvalidation::text(),
+    )
+    .await
+    .expect("invalidate rollback");
+    tx.rollback().await.expect("rollback");
+    let after_rollback: i64 =
+        sqlx::query_scalar("SELECT state_revision FROM subjects WHERE subject_id=$1")
+            .bind(subject.0)
+            .fetch_one(runtime.store.pool())
+            .await
+            .expect("state after rollback");
+    assert_eq!(after_rollback, after_commit);
+    runtime.store.close().await;
+    postgres.stop().await.expect("stop PostgreSQL");
+}
+
+#[tokio::test]
+async fn selective_serving_preparation_does_not_build_unrelated_families() {
+    let (postgres, url, root) = database().await;
+    let runtime = open_runtime(&url, &root, false, None).await;
+    let subject = runtime
+        .subjects
+        .create_subject(seed_input())
+        .await
+        .expect("subject")
+        .subject_id;
+    runtime
+        .serving
+        .prepare(
+            subject,
+            ServingNeed {
+                exact: true,
+                lexical: false,
+                dense: false,
+                topology: false,
+            },
+        )
+        .await
+        .expect("prepare exact");
+    let after_exact = runtime
+        .store
+        .serving_current(subject)
+        .await
+        .expect("current exact");
+    assert!(after_exact.iter().all(|record| record.family == "exact"));
+    runtime
+        .serving
+        .prepare(
+            subject,
+            ServingNeed {
+                exact: false,
+                lexical: true,
+                dense: false,
+                topology: false,
+            },
+        )
+        .await
+        .expect("prepare lexical");
+    let after_lexical = runtime
+        .store
+        .serving_current(subject)
+        .await
+        .expect("current lexical");
+    assert!(
+        after_lexical
+            .iter()
+            .all(|record| matches!(record.family.as_str(), "exact" | "lexical"))
+    );
+    runtime
+        .serving
+        .prepare(
+            subject,
+            ServingNeed {
+                exact: false,
+                lexical: false,
+                dense: false,
+                topology: true,
+            },
+        )
+        .await
+        .expect("prepare topology");
+    let after_topology = runtime
+        .store
+        .serving_current(subject)
+        .await
+        .expect("current topology");
+    assert!(
+        after_topology
+            .iter()
+            .all(|record| matches!(record.family.as_str(), "exact" | "lexical" | "topology"))
+    );
     runtime.store.close().await;
     postgres.stop().await.expect("stop PostgreSQL");
 }

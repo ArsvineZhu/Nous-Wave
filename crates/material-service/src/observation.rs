@@ -131,6 +131,12 @@ impl MaterialService {
             sqlx::query("INSERT INTO coverage_needs(coverage_need_id,subject_id,source_region_id,representation_kind,capability_operation,requirement,state,updated_at) VALUES($1,$2,$3,'extracted_text','document_extraction','preferred',$4,$5) ON CONFLICT(subject_id,source_region_id,representation_kind,capability_operation) DO UPDATE SET updated_at=excluded.updated_at")
                 .bind(Uuid::now_v7()).bind(input.subject.0).bind(region.source_region_id.0).bind(if matches!(input.material, ObservationMaterial::InlineText{..}){"ready"}else{"missing"}).bind(now).execute(&mut *tx).await.map_err(db)?;
         }
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            input.subject,
+            ProjectionInvalidation::text(),
+        )
+        .await?;
         tx.commit().await.map_err(db)?;
         drop(object_guard);
         let memory_revisions = Vec::new();
@@ -170,9 +176,6 @@ impl MaterialService {
         }
         // Runtime continuity is admitted before projection invalidation. A serving
         // failure cannot erase the durable observation or its resident reference.
-        self.store
-            .invalidate(input.subject, ProjectionInvalidation::text())
-            .await?;
         Ok(AcceptedObservation {
             artifact,
             occurrence,

@@ -9,6 +9,76 @@ pub struct SourceSeed {
     pub hop_zero: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeedFamily {
+    Explicit,
+    Exact,
+    Entity,
+    Tag,
+    Anchor,
+    Resource,
+    Runtime,
+    Relation,
+    Residual,
+}
+
+impl SeedFamily {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit_query",
+            Self::Exact => "exact_target",
+            Self::Entity => "entity_cue",
+            Self::Tag => "tag_cue",
+            Self::Anchor => "anchor_cue",
+            Self::Resource => "resource_cue",
+            Self::Runtime => "runtime_situation",
+            Self::Relation => "relation_cue",
+            Self::Residual => "residual_discovery",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeedOrigin {
+    ExplicitQuery,
+    ExactTarget,
+    EntityCue,
+    TagCue,
+    AnchorCue,
+    ResourceCue,
+    RuntimeSituation,
+    RelationCue,
+    ResidualDiscovery,
+}
+
+impl SeedOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExplicitQuery => "explicit_query",
+            Self::ExactTarget => "exact_target",
+            Self::EntityCue => "entity_cue",
+            Self::TagCue => "tag_cue",
+            Self::AnchorCue => "anchor_cue",
+            Self::ResourceCue => "resource_cue",
+            Self::RuntimeSituation => "runtime_situation",
+            Self::RelationCue => "relation_cue",
+            Self::ResidualDiscovery => "residual_discovery",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeightedCognitiveSeed {
+    pub node: u32,
+    pub weight: f64,
+    pub family: SeedFamily,
+    pub origin: SeedOrigin,
+    pub provenance: Option<String>,
+    pub embedding_space: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiverEdgeFlow {
     pub from: u32,
@@ -69,7 +139,59 @@ fn merge_propagation_state(existing: &mut PropagationState, next: PropagationSta
 // The bounded propagation loop intentionally keeps state, flow and truncation together.
 #[allow(clippy::too_many_lines)]
 pub fn propagate(graph: &WaveGraphGeneration, seeds: &[SourceSeed]) -> QueryRiver {
-    let config = graph.config;
+    propagate_with_config(graph, seeds, graph.config)
+}
+
+pub fn propagate_weighted(
+    graph: &WaveGraphGeneration,
+    seeds: &[WeightedCognitiveSeed],
+) -> QueryRiver {
+    propagate_weighted_with_budget(graph, seeds, graph.config.max_hops, graph.config.max_states)
+}
+
+pub fn propagate_weighted_with_budget(
+    graph: &WaveGraphGeneration,
+    seeds: &[WeightedCognitiveSeed],
+    max_hops: usize,
+    max_states: usize,
+) -> QueryRiver {
+    let source = seeds
+        .iter()
+        .map(|seed| SourceSeed {
+            node: seed.node,
+            weight: seed.weight,
+            seed_family: seed.family.as_str().into(),
+            origin_cue: seed
+                .provenance
+                .clone()
+                .unwrap_or_else(|| seed.origin.as_str().into()),
+            hop_zero: true,
+        })
+        .collect::<Vec<_>>();
+    propagate_with_budget(graph, &source, max_hops, max_states)
+}
+
+pub fn propagate_with_budget(
+    graph: &WaveGraphGeneration,
+    seeds: &[SourceSeed],
+    max_hops: usize,
+    max_states: usize,
+) -> QueryRiver {
+    let mut config = graph.config;
+    config.max_hops = max_hops.clamp(1, graph.config.max_hops);
+    config.max_states = max_states.clamp(1, graph.config.max_states);
+    propagate_with_config(graph, seeds, config)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "bounded propagation is one algorithmic kernel: state, flow, and truncation belong together"
+)]
+fn propagate_with_config(
+    graph: &WaveGraphGeneration,
+    seeds: &[SourceSeed],
+    config: WaveConfig,
+) -> QueryRiver {
     let sum: f64 = seeds
         .iter()
         .filter(|seed| seed.weight.is_finite() && seed.weight > 0.0)

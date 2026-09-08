@@ -6,6 +6,10 @@ use sqlx::Row;
 use std::collections::HashSet;
 
 impl MemoryService {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "projection resolves exact refs and ranked memory views as one bounded result assembly"
+    )]
     pub(crate) async fn project_memory_results(
         &self,
         query: &CognitiveQuery,
@@ -16,6 +20,7 @@ impl MemoryService {
             MemoryRevisionId,
             sqlx::postgres::PgRow,
         )],
+        materialize_evidence: bool,
     ) -> Result<(Vec<CognitiveHit>, HashSet<CognitiveRef>)> {
         let mut results = Vec::new();
         let mut result_references = HashSet::new();
@@ -121,7 +126,9 @@ impl MemoryService {
                     variants: candidate.variants,
                     explanation: Some("candidate evidence retained by family".into()),
                 },
-                materialization: if query.result_need.need_materialization_handles {
+                materialization: if query.result_need.need_materialization_handles
+                    && materialize_evidence
+                {
                     vec![MaterializationHandle {
                         reference: CognitiveRef::MemoryRevision(*revision),
                         level: "memory_revision".into(),

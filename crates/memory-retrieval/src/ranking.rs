@@ -121,3 +121,41 @@ pub fn rank_candidates(
     });
     base
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(reference: &str, rank: usize) -> CandidateRankInput {
+        let seed = reference
+            .as_bytes()
+            .iter()
+            .fold(0_u128, |acc, byte| (acc << 8) | u128::from(*byte));
+        CandidateRankInput {
+            reference: CognitiveRef::Memory(nous_core::MemoryId(uuid::Uuid::from_u128(seed))),
+            family_ranks: HashMap::from([(EvidenceFamily::SemanticDense, rank)]),
+            topology: CandidateTopologyObservation::default(),
+            trail: None,
+            variants: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn family_ranking_does_not_depend_on_candidate_enumeration_order() {
+        let forward = vec![candidate("a", 1), candidate("b", 2), candidate("c", 3)];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        let first = rank_candidates(&forward, 0.0);
+        let second = rank_candidates(&reversed, 0.0);
+        assert_eq!(
+            first
+                .iter()
+                .map(|candidate| (candidate.reference.to_string(), candidate.final_score))
+                .collect::<Vec<_>>(),
+            second
+                .iter()
+                .map(|candidate| (candidate.reference.to_string(), candidate.final_score))
+                .collect::<Vec<_>>()
+        );
+    }
+}

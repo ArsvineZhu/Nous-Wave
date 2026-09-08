@@ -92,6 +92,44 @@ fn river_records_only_actual_flow_and_is_finite() {
 }
 
 #[test]
+fn weighted_seeds_preserve_relative_mass_and_provenance() {
+    let graph = graph();
+    let explicit = WeightedCognitiveSeed {
+        node: 0,
+        weight: 1.0,
+        family: SeedFamily::Explicit,
+        origin: SeedOrigin::ExplicitQuery,
+        provenance: None,
+        embedding_space: None,
+    };
+    let residual = WeightedCognitiveSeed {
+        node: 1,
+        weight: 4.0,
+        family: SeedFamily::Residual,
+        origin: SeedOrigin::ResidualDiscovery,
+        provenance: None,
+        embedding_space: Some("test-space".into()),
+    };
+    let forward = propagate_weighted(&graph, &[explicit.clone(), residual.clone()]);
+    let reversed = propagate_weighted(&graph, &[residual, explicit]);
+    assert!(forward.source_field[&0] < forward.source_field[&1] - 1e-9);
+    assert_eq!(forward.source_field[&0], reversed.source_field[&0]);
+    assert_eq!(forward.source_field[&1], reversed.source_field[&1]);
+    assert!(forward.provenance.iter().any(|entry| {
+        entry
+            .origin_seeds
+            .iter()
+            .any(|origin| origin == "explicit_query")
+    }));
+    assert!(forward.provenance.iter().any(|entry| {
+        entry
+            .origin_seeds
+            .iter()
+            .any(|origin| origin == "residual_discovery")
+    }));
+}
+
+#[test]
 fn unordered_trail_has_no_fabricated_path_contact() {
     let graph = graph();
     let river = propagate(

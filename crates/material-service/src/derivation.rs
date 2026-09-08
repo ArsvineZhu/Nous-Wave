@@ -101,10 +101,13 @@ impl MaterialService {
             .execute(&mut *tx)
             .await
             .map_err(db)?;
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            representation.subject_id,
+            ProjectionInvalidation::text(),
+        )
+        .await?;
         tx.commit().await.map_err(db)?;
-        self.store
-            .invalidate(representation.subject_id, ProjectionInvalidation::text())
-            .await?;
         Ok(representation)
     }
 

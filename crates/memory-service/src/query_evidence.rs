@@ -1,7 +1,8 @@
+use super::query_helpers::CandidateAccumulator;
 use super::support::*;
 use super::*;
 use sqlx::Row;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 impl MemoryService {
     // Evidence projection keeps raw, derived, runtime and Resource result semantics together.
@@ -9,11 +10,15 @@ impl MemoryService {
     pub(crate) async fn append_evidence_results(
         &self,
         query: &CognitiveQuery,
-        lexical_ranks: &HashMap<CognitiveRef, usize>,
+        candidates: &CandidateAccumulator,
         resident_occurrences: Vec<OccurrenceId>,
         results: &mut Vec<CognitiveHit>,
         result_references: &mut HashSet<CognitiveRef>,
+        materialize_evidence: bool,
     ) -> Result<()> {
+        let lexical_ranks = candidates.lexical_ranks();
+        let dense_ranks = candidates.dense_ranks();
+        let dense_variants = candidates.dense_variants();
         let target_allows_derived = query.targets.is_empty()
             || query.targets.iter().any(|target| {
                 matches!(
@@ -100,7 +105,9 @@ impl MemoryService {
                         variants: Vec::new(),
                         explanation: Some("resident observation".into()),
                     },
-                    materialization: if query.result_need.need_materialization_handles {
+                    materialization: if query.result_need.need_materialization_handles
+                        && materialize_evidence
+                    {
                         vec![MaterializationHandle {
                             reference: reference.clone(),
                             level: "evidence_occurrence".into(),
@@ -117,11 +124,26 @@ impl MemoryService {
             }
         }
         if target_allows_derived && results.len() < query.result_need.limit {
-            let mut derived_candidates = lexical_ranks
-                .iter()
-                .filter_map(|(reference, rank)| match reference {
-                    CognitiveRef::DerivedRepresentation(id) => Some((*rank, *id)),
+            let mut derived_ids = lexical_ranks
+                .keys()
+                .chain(dense_ranks.keys())
+                .filter_map(|reference| match reference {
+                    CognitiveRef::DerivedRepresentation(id) => Some(*id),
                     _ => None,
+                })
+                .collect::<HashSet<_>>();
+            let mut derived_candidates = derived_ids
+                .drain()
+                .map(|id| {
+                    let reference = CognitiveRef::DerivedRepresentation(id);
+                    let rank = lexical_ranks
+                        .get(&reference)
+                        .into_iter()
+                        .chain(dense_ranks.get(&reference))
+                        .copied()
+                        .min()
+                        .unwrap_or(usize::MAX);
+                    (rank, id)
                 })
                 .collect::<Vec<_>>();
             derived_candidates.sort_by_key(|(rank, id)| (*rank, id.0));
@@ -149,6 +171,21 @@ impl MemoryService {
                 {
                     continue;
                 }
+                let mut families = Vec::new();
+                if lexical_ranks.contains_key(&reference) {
+                    families.push(EvidenceFamily::Lexical);
+                }
+                if dense_ranks.contains_key(&reference) {
+                    families.push(EvidenceFamily::SemanticDense);
+                }
+                let variants = dense_variants
+                    .get(&reference)
+                    .map(|values| {
+                        let mut values = values.iter().cloned().collect::<Vec<_>>();
+                        values.sort();
+                        values
+                    })
+                    .unwrap_or_default();
                 results.push(CognitiveHit {
                     reference: reference.clone(),
                     revision: None,
@@ -171,7 +208,7 @@ impl MemoryService {
                         Vec::new()
                     },
                     match_evidence: MatchEvidence {
-                        families: vec![EvidenceFamily::Lexical],
+                        families,
                         base_rank_score: 1.0 / (60.0 + rank as f64),
                         field_contact: 0.0,
                         structural_score: 0.0,
@@ -179,10 +216,12 @@ impl MemoryService {
                         wave_observability: 0.0,
                         direct_seed_evidence: 0.0,
                         final_score: 1.0 / (60.0 + rank as f64),
-                        variants: Vec::new(),
+                        variants,
                         explanation: Some("persisted derived textual surrogate".into()),
                     },
-                    materialization: if query.result_need.need_materialization_handles {
+                    materialization: if query.result_need.need_materialization_handles
+                        && materialize_evidence
+                    {
                         vec![MaterializationHandle {
                             reference: CognitiveRef::SourceRegion(source_region),
                             level: "evidence_region".into(),
@@ -196,11 +235,26 @@ impl MemoryService {
             }
         }
         if target_allows_derived && results.len() < query.result_need.limit {
-            let mut occurrence_candidates = lexical_ranks
-                .iter()
-                .filter_map(|(reference, rank)| match reference {
-                    CognitiveRef::Occurrence(id) => Some((*rank, *id)),
+            let mut occurrence_ids = lexical_ranks
+                .keys()
+                .chain(dense_ranks.keys())
+                .filter_map(|reference| match reference {
+                    CognitiveRef::Occurrence(id) => Some(*id),
                     _ => None,
+                })
+                .collect::<HashSet<_>>();
+            let mut occurrence_candidates = occurrence_ids
+                .drain()
+                .map(|id| {
+                    let reference = CognitiveRef::Occurrence(id);
+                    let rank = lexical_ranks
+                        .get(&reference)
+                        .into_iter()
+                        .chain(dense_ranks.get(&reference))
+                        .copied()
+                        .min()
+                        .unwrap_or(usize::MAX);
+                    (rank, id)
                 })
                 .collect::<Vec<_>>();
             occurrence_candidates.sort_by_key(|(rank, id)| (*rank, id.0));
@@ -249,6 +303,21 @@ impl MemoryService {
                 let Ok(text) = String::from_utf8(bytes) else {
                     continue;
                 };
+                let mut families = Vec::new();
+                if lexical_ranks.contains_key(&reference) {
+                    families.push(EvidenceFamily::Lexical);
+                }
+                if dense_ranks.contains_key(&reference) {
+                    families.push(EvidenceFamily::SemanticDense);
+                }
+                let variants = dense_variants
+                    .get(&reference)
+                    .map(|values| {
+                        let mut values = values.iter().cloned().collect::<Vec<_>>();
+                        values.sort();
+                        values
+                    })
+                    .unwrap_or_default();
                 results.push(CognitiveHit {
                     reference: reference.clone(),
                     revision: None,
@@ -271,7 +340,7 @@ impl MemoryService {
                         Vec::new()
                     },
                     match_evidence: MatchEvidence {
-                        families: vec![EvidenceFamily::Lexical],
+                        families,
                         base_rank_score: 1.0 / (60.0 + rank as f64),
                         field_contact: 0.0,
                         structural_score: 0.0,
@@ -279,10 +348,12 @@ impl MemoryService {
                         wave_observability: 0.0,
                         direct_seed_evidence: 0.0,
                         final_score: 1.0 / (60.0 + rank as f64),
-                        variants: Vec::new(),
+                        variants,
                         explanation: Some("raw observed textual evidence".into()),
                     },
-                    materialization: if query.result_need.need_materialization_handles {
+                    materialization: if query.result_need.need_materialization_handles
+                        && materialize_evidence
+                    {
                         vec![MaterializationHandle {
                             reference: CognitiveRef::Occurrence(occurrence_id),
                             level: "evidence_occurrence".into(),

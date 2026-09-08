@@ -1,51 +1,67 @@
 # Nous Wave
 
-Nous Wave is a pre-production cognitive substrate for a persistent Subject. The
-current implementation authority is the [2026-09-07 Production Implementation
-Spec](docs/Nous_Wave/Nous_Wave_Production_Implementation_Spec_2026-09-07.md),
-with semantic context in the [system description](docs/Nous_Wave/Nous_Wave_System_Description_2026-09-07.md).
+Nous Wave is a pre-production Subject cognition system.
 
-The first wave separates evidence, Cognitive Authority, Session runtime, and
-rebuildable serving projections:
+It maintains long-lived cognitive state across model calls, processes, providers and interaction surfaces while keeping external systems authoritative for their own live/current facts.
 
-- PostgreSQL + SQLx stores revisions, provenance, occurrences, runtime state,
-  derivation work, and resource awareness.
-- OpenDAL/BLAKE3 CAS stores raw artifacts.
-- Tantivy, USearch, exact postings, and petgraph CSR are serving projections;
-  they are never cognitive Authority.
-- The typed `CognitiveQuery` protocol combines runtime, exact, lexical, dense,
-  entity, resource, and bounded clean-room Wave evidence.
+## Architecture
 
-Zero-model startup is supported. Explicit memory formation, evidence inspection,
-session residency, typed Tags/Anchors/Associations, and deterministic topology
-remain available when inference providers are absent. Current external facts
-remain owned by Host-provided Resource resolvers.
+Current authority:
+- [`docs/Nous_Wave/ARCHITECTURE.md`](docs/Nous_Wave/ARCHITECTURE.md)
+- [`docs/Nous_Wave/DECISIONS.md`](docs/Nous_Wave/DECISIONS.md)
+- [`docs/Nous_Wave/DESIGN_TRANSFER.md`](docs/Nous_Wave/DESIGN_TRANSFER.md)
+
+System walkthrough:
+- [`docs/Nous_Wave/SYSTEM.md`](docs/Nous_Wave/SYSTEM.md)
+
+Research/source lineage:
+- [`docs/Nous_Wave/SOURCES.md`](docs/Nous_Wave/SOURCES.md)
+
+Core ownership:
+
+```text
+Subject Core             required
+Cognitive Runtime        required
+Memory MicroSystem       optional; enabled in reference profile
+```
+
+Serving projections are rebuildable mechanics and never cognitive Authority.
 
 ## Development
 
-Copy [config.example.toml](config.example.toml) to `config.toml`. The default
-managed profile uses PostgreSQL Embedded 18.6 and stores data below the executable
-directory; `NOUS_WAVE_POSTGRES_URL` selects an external PostgreSQL URL.
+Pinned Rust toolchain: `rust-toolchain.toml`.
+
+Install repository development commands once:
 
 ```text
-cargo run -p nous-wave -- --config config.toml status
-cargo run -p nous-wave -- --config config.toml serve
+cargo install just cargo-deny cargo-shear --locked
 ```
 
-The service binds to loopback unless an authenticated transport policy is added
-by a later Host integration. The public HTTP surface is versioned under
-`/v1/subjects/...`; CLI and HTTP operations use typed JSON rather than a generic
-memory payload.
-
-Verification at meaningful boundaries:
+Common commands:
 
 ```text
-cargo fmt --check
-cargo check --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+just fmt
+just check
+just lint
+just test
+just verify
 ```
 
-VCP TagMemo/RiverMemo is research lineage for the independently implemented
-bounded Wave, residual cue, actual-flow, and observability mechanics. VCP source
-code is not copied and is not a runtime dependency.
+`just verify` includes formatting, workspace checking, Clippy, tests, dependency/security/license checks and repository source-shape checks.
+
+## Runtime defaults
+
+The current local implementation uses:
+- PostgreSQL + SQLx for structured Authority;
+- OpenDAL/BLAKE3 for raw artifact CAS;
+- Tantivy for lexical serving;
+- USearch for dense serving;
+- petgraph CSR for topology serving.
+
+These are current implementation defaults, not permanent cognitive theory.
+
+## VCP lineage
+
+VCP TagMemo/RiverMemo is algorithmic research lineage for weak-cue sensing, bounded Wave-style associative expansion, actual-flow and topology-field mechanics.
+
+VCP source code is not copied and is not a runtime dependency.

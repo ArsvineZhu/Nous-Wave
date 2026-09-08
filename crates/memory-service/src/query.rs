@@ -226,14 +226,14 @@ fn wave_seeds(
     seeds
 }
 
-impl LocalRuntime {
+impl MemoryService {
     pub async fn query(&self, query: CognitiveQuery) -> Result<CognitiveQueryResult> {
         query.validate()?;
         self.require_subject(query.subject).await?;
         if let Some(session) = query.session {
-            self.require_session(query.subject, session).await?;
+            self.cognition.require_session(query.subject, session).await?;
         }
-        let snapshot = self.publisher.snapshot_for(query.subject);
+        let snapshot = self.serving.publisher.snapshot_for(query.subject);
         let mut degradation = Vec::new();
         let has_text_cue = query
             .cues
@@ -243,7 +243,7 @@ impl LocalRuntime {
             query.capabilities.text_embedding,
             RequirementStrength::Required
         ) && has_text_cue
-            && (snapshot.dense.is_empty() || self.text_embedding_provider.is_none())
+            && (snapshot.dense.is_empty() || self.serving.embedding.is_none())
         {
             return Err(Error::Unavailable(
                 "text embedding capability/generation is unavailable".into(),
@@ -253,7 +253,7 @@ impl LocalRuntime {
             query.capabilities.text_embedding,
             RequirementStrength::Preferred
         ) && has_text_cue
-            && (snapshot.dense.is_empty() || self.text_embedding_provider.is_none())
+            && (snapshot.dense.is_empty() || self.serving.embedding.is_none())
         {
             degradation.push(Degradation {
                 code: "text_embedding_unavailable".into(),
@@ -264,7 +264,7 @@ impl LocalRuntime {
             query.capabilities.residual_sensing,
             RequirementStrength::Required
         ) && has_text_cue
-            && (snapshot.dense.is_empty() || self.text_embedding_provider.is_none())
+            && (snapshot.dense.is_empty() || self.serving.embedding.is_none())
         {
             return Err(Error::Unavailable(
                 "residual sensing requires a compatible dense generation".into(),
@@ -274,7 +274,7 @@ impl LocalRuntime {
             query.capabilities.residual_sensing,
             RequirementStrength::Preferred
         ) && has_text_cue
-            && (snapshot.dense.is_empty() || self.text_embedding_provider.is_none())
+            && (snapshot.dense.is_empty() || self.serving.embedding.is_none())
         {
             degradation.push(Degradation {
                 code: "residual_sensing_unavailable".into(),
@@ -339,7 +339,7 @@ impl LocalRuntime {
         let mut query_embedding = None;
         if !pattern.is_empty()
             && query.capabilities.text_embedding != RequirementStrength::Forbidden
-            && let Some(provider) = &self.text_embedding_provider
+            && let Some(provider) = &self.serving.embedding
         {
             match provider
                 .embed(TextEmbeddingRequest {
@@ -737,7 +737,7 @@ impl LocalRuntime {
             }
         }
         let resident_refs = if let Some(session) = query.session {
-            self.resident_reference_strings(session).await?
+            self.cognition.resident_reference_strings(session).await?
         } else {
             HashSet::new()
         };
@@ -1488,7 +1488,7 @@ impl LocalRuntime {
             .any(|target| matches!(target, QueryTarget::Resource))
             && results.len() < query.result_need.limit
         {
-            for resource in self.list_resources(query.subject).await? {
+            for resource in self.cognition.list_resources(query.subject).await? {
                 let descriptor = resource.descriptor;
                 if query
                     .constraints
@@ -1544,7 +1544,7 @@ impl LocalRuntime {
             }
         }
         let (resource_actions, resource_degradation) =
-            self.resource_actions_for_query(&query).await?;
+            self.cognition.resource_actions_for_query(&query).await?;
         degradation.extend(resource_degradation);
         let status = if degradation.is_empty() {
             QueryStatus::Complete
@@ -1609,5 +1609,11 @@ impl LocalRuntime {
                 },
             ),
         })
+    }
+}
+#[async_trait::async_trait]
+impl nous_cognitive_runtime::CognitiveContributor for MemoryService {
+    async fn contribute(&self, query: &CognitiveQuery, _plan: &nous_cognitive_runtime::QueryPlan) -> Result<CognitiveQueryResult> {
+        self.query(query.clone()).await
     }
 }

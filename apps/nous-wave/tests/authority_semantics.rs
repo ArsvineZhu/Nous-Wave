@@ -7,14 +7,15 @@ use nous_material::{
     FormationDirective, ObservationInput, ObservationMaterial, OccurrenceDescriptor,
     ResolvedEntityMention, RuntimeDirective,
 };
+use nous_cognitive_runtime::UseKind;
 use nous_memory_domain::{
-    EvidenceRef, ExplicitMemoryInput, MemoryClass, MemoryRevisionEvidence, SupportRole, UseKind,
+    EvidenceRef, ExplicitMemoryInput, MemoryClass, MemoryRevisionEvidence, SupportRole,
 };
-use nous_memory_service::{
-    CreateSubject, DocumentExtractionOutput, DocumentExtractionProvider, DocumentExtractionRequest,
-    LocalRuntime, TextEmbeddingOutput, TextEmbeddingProvider, TextEmbeddingRequest, UseFeedback,
-    UseFeedbackEvent,
-};
+use nous_subject_core::{CreateSubject, CharacterSeedInput};
+use nous_material_service::{DocumentExtractionOutput, DocumentExtractionProvider, DocumentExtractionRequest};
+use nous_serving::{TextEmbeddingOutput, TextEmbeddingProvider, TextEmbeddingRequest, ServingOptions};
+use nous_cognitive_runtime::{UseFeedback, UseFeedbackEvent};
+use nous_wave::{NousRuntime, RuntimeOptions};
 use postgresql_embedded::{PostgreSQL, SettingsBuilder, VersionReq};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -27,6 +28,10 @@ struct TestEmbedder;
 
 #[async_trait::async_trait]
 impl TextEmbeddingProvider for TestEmbedder {
+    fn space(&self)->EmbeddingSpaceSignature { EmbeddingSpaceSignature { space_hash:"test-text-space-v1".into(),model_identity:"test".into(),weights_revision:"1".into(),task:"retrieval".into(),input_representation:"text".into(),preprocessing_identity:"lowercase".into(),preprocessing_revision:"1".into(),dimension:3,normalization:"none".into(),output_semantics:"dense_similarity".into() } }
+    fn producer(&self)->ProducerSignature { ProducerSignature { signature_hash:"test-text-producer-v1".into(),provider_class:"deterministic-library".into(),operation:CapabilityOperation::TextEmbedding,implementation:"test-embedder".into(),model_identity:Some("test".into()),model_revision:Some("1".into()),preprocessing_identity:"lowercase".into(),preprocessing_revision:"1".into(),config_digest:"test".into() } }
+
+
     async fn embed(&self, request: TextEmbeddingRequest) -> nous_core::Result<TextEmbeddingOutput> {
         let text = request.text.to_ascii_lowercase();
         let tag_index = text
@@ -74,16 +79,9 @@ impl TextEmbeddingProvider for TestEmbedder {
 #[tokio::test]
 async fn derivation_claim_and_provider_commit_preserve_textual_surrogate() {
     let (postgres, url, root) = database().await;
-    let runtime = LocalRuntime::open_with_options(
-        &url,
-        4,
-        root.path().join("objects").to_string_lossy().as_ref(),
-        1024 * 1024,
-    )
-    .await
-    .expect("open runtime");
-    let subject = runtime
-        .create_subject(CreateSubject::default())
+    let runtime = open_runtime(&url, &root, true, None).await;
+    let subject = runtime.subjects
+        .create_subject(seed_input())
         .await
         .expect("subject")
         .subject_id;
@@ -121,7 +119,7 @@ async fn derivation_claim_and_provider_commit_preserve_textual_surrogate() {
         preprocessing_revision: "1".into(),
         config_digest: "test".into(),
     };
-    let _derivation = runtime
+    let _derivation = runtime.material
         .schedule_derivation(
             subject,
             observed
@@ -135,7 +133,7 @@ async fn derivation_claim_and_provider_commit_preserve_textual_surrogate() {
         )
         .await
         .expect("schedule derivation");
-    let run = runtime
+    let run = runtime.material
         .run_pending_derivations(1, "test-worker", Arc::new(TestExtractor { producer }))
         .await
         .expect("run derivation");
@@ -217,20 +215,13 @@ async fn database() -> (PostgreSQL, String, TempDir) {
 #[tokio::test]
 async fn same_artifact_keeps_distinct_occurrences_and_use_is_explicit() {
     let (postgres, url, root) = database().await;
-    let runtime = LocalRuntime::open_with_options(
-        &url,
-        4,
-        root.path().join("objects").to_string_lossy().as_ref(),
-        1024 * 1024,
-    )
-    .await
-    .expect("open runtime");
-    let subject = runtime
-        .create_subject(CreateSubject::default())
+    let runtime = open_runtime(&url, &root, true, None).await;
+    let subject = runtime.subjects
+        .create_subject(seed_input())
         .await
         .expect("subject")
         .subject_id;
-    let session = runtime
+    let session = runtime.cognition
         .open_session(subject, serde_json::json!({}))
         .await
         .expect("session")
@@ -272,7 +263,7 @@ async fn same_artifact_keeps_distinct_occurrences_and_use_is_explicit() {
         second.occurrence.occurrence_id
     );
     assert!(
-        runtime
+        runtime.cognition
             .session(subject, session)
             .await
             .expect("session after observe")
@@ -281,7 +272,7 @@ async fn same_artifact_keeps_distinct_occurrences_and_use_is_explicit() {
             >= 2
     );
 
-    let memory = runtime
+    let memory = runtime.require_memory().expect("memory")
         .form_memory(ExplicitMemoryInput {
             subject,
             memory_class: MemoryClass::Specific,
@@ -307,7 +298,7 @@ async fn same_artifact_keeps_distinct_occurrences_and_use_is_explicit() {
         })
         .await
         .expect("explicit memory");
-    runtime
+    runtime.cognition
         .use_feedback(UseFeedback {
             subject,
             session_id: Some(session),
@@ -321,14 +312,14 @@ async fn same_artifact_keeps_distinct_occurrences_and_use_is_explicit() {
         .await
         .expect("surface feedback");
     assert!(
-        runtime
+        runtime.cognition
             .session(subject, session)
             .await
             .expect("surface session")
             .last_meaningful_use_at
             .is_none()
     );
-    runtime
+    runtime.cognition
         .use_feedback(UseFeedback {
             subject,
             session_id: Some(session),
@@ -342,7 +333,7 @@ async fn same_artifact_keeps_distinct_occurrences_and_use_is_explicit() {
         .await
         .expect("meaningful feedback");
     assert!(
-        runtime
+        runtime.cognition
             .session(subject, session)
             .await
             .expect("meaningful session")
@@ -357,17 +348,9 @@ async fn same_artifact_keeps_distinct_occurrences_and_use_is_explicit() {
 #[tokio::test]
 async fn query_uses_rebuilt_entity_tag_and_lexical_projections() {
     let (postgres, url, root) = database().await;
-    let runtime = LocalRuntime::open_with_options(
-        &url,
-        4,
-        root.path().join("objects").to_string_lossy().as_ref(),
-        1024 * 1024,
-    )
-    .await
-    .expect("open runtime")
-    .with_text_embedding_provider(Arc::new(TestEmbedder));
-    let subject = runtime
-        .create_subject(CreateSubject::default())
+    let runtime = open_runtime(&url, &root, true, Some(Arc::new(TestEmbedder))).await;
+    let subject = runtime.subjects
+        .create_subject(seed_input())
         .await
         .expect("subject")
         .subject_id;
@@ -399,7 +382,7 @@ async fn query_uses_rebuilt_entity_tag_and_lexical_projections() {
         })
         .await
         .expect("observation");
-    let tag = runtime
+    let tag = runtime.require_memory().expect("memory")
         .create_tag(
             subject,
             nous_memory_service::CreateTagRequest {
@@ -412,7 +395,7 @@ async fn query_uses_rebuilt_entity_tag_and_lexical_projections() {
         .await
         .expect("tag");
     for index in 0..8 {
-        runtime
+        runtime.require_memory().expect("memory")
             .create_tag(
                 subject,
                 nous_memory_service::CreateTagRequest {
@@ -425,7 +408,7 @@ async fn query_uses_rebuilt_entity_tag_and_lexical_projections() {
             .await
             .expect("EPA tag");
     }
-    let memory = runtime
+    let memory = runtime.require_memory().expect("memory")
         .form_memory(ExplicitMemoryInput {
             subject,
             memory_class: MemoryClass::Specific,
@@ -532,4 +515,9 @@ async fn query_uses_rebuilt_entity_tag_and_lexical_projections() {
 
     runtime.store.close().await;
     postgres.stop().await.expect("stop PostgreSQL");
+}
+
+fn seed_input()->CreateSubject {CreateSubject {subject_id:None,character_seed:CharacterSeedInput {text:"Human authored initial character. 原始种子。".into(),media_type:"text/plain".into(),provenance:serde_json::json!({"author":"human"})},config:serde_json::json!({})}}
+async fn open_runtime(url:&str,root:&TempDir,memory_enabled:bool,embedding:Option<Arc<dyn TextEmbeddingProvider>>)->NousRuntime {
+    NousRuntime::open(RuntimeOptions {postgres_url:url.into(),max_connections:4,object_root:root.path().join("objects").to_string_lossy().into_owned(),max_upload_bytes:1024*1024,resident_limit:256,memory_enabled,serving_options:ServingOptions {root:root.path().join("serving"),lexical:true,dense:true,topology:true,memory_enabled},embedding}).await.expect("open runtime")
 }

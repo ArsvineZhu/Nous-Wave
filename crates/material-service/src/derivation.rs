@@ -1,7 +1,7 @@
-use super::support::*;
+use nous_authority_store::database_error as db;
 use super::*;
 
-impl LocalRuntime {
+impl MaterialService {
     pub async fn persist_derived_representation(
         &self,
         representation: DerivedRepresentation,
@@ -69,7 +69,7 @@ impl LocalRuntime {
             .await
             .map_err(db)?;
         tx.commit().await.map_err(db)?;
-        self.rebuild_projection(representation.subject_id).await?;
+        self.store.invalidate(representation.subject_id, ProjectionInvalidation::text()).await?;
         Ok(representation)
     }
 
@@ -84,7 +84,7 @@ impl LocalRuntime {
         producer: ProducerSignature,
         requirement: &str,
     ) -> Result<DerivationId> {
-        self.require_subject(subject).await?;
+        self.store.require_subject(subject).await?;
         if !matches!(requirement, "required" | "preferred" | "opportunistic") {
             return Err(Error::Invalid("invalid derivation requirement".into()));
         }

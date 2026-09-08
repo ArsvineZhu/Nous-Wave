@@ -286,22 +286,6 @@ impl AssociationSupportClass {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceDescriptor {
-    pub subject_id: SubjectId,
-    pub resource_ref: nous_core::ResourceRef,
-    pub display_label: Option<String>,
-    pub authority_class: String,
-    pub coverage: serde_json::Value,
-    pub query_dimensions: serde_json::Value,
-    pub modalities: serde_json::Value,
-    pub freshness_policy: serde_json::Value,
-    pub access_cost_class: String,
-    pub resolver_key: String,
-    pub readiness: String,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryFormationProposal {
     pub memory_class: MemoryClass,
     pub semantic_role: String,
@@ -453,106 +437,9 @@ pub struct ConsolidationRequest {
     pub semantic_role: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UseKind {
-    Surfaced,
-    Inspected,
-    Selected,
-    Referenced,
-    ActedOn,
-    Corroborated,
-    Corrected,
-    Pinned,
-    Rejected,
-}
-
-impl UseKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Surfaced => "surfaced",
-            Self::Inspected => "inspected",
-            Self::Selected => "selected",
-            Self::Referenced => "referenced",
-            Self::ActedOn => "acted_on",
-            Self::Corroborated => "corroborated",
-            Self::Corrected => "corrected",
-            Self::Pinned => "pinned",
-            Self::Rejected => "rejected",
-        }
-    }
-
-    pub fn meaningful(self) -> bool {
-        matches!(
-            self,
-            Self::Referenced | Self::ActedOn | Self::Corroborated | Self::Pinned | Self::Corrected
-        )
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CognitiveUseEvent {
-    pub use_event_id: Uuid,
-    pub subject_id: SubjectId,
-    pub session_id: Option<SessionId>,
-    pub reference: CognitiveRef,
-    pub use_kind: UseKind,
-    pub consumer_ref: Option<String>,
-    pub occurred_at: DateTime<Utc>,
-    pub context: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CognitiveSession {
-    pub session_id: SessionId,
-    pub subject_id: SubjectId,
-    pub opened_at: DateTime<Utc>,
-    pub last_activity_at: DateTime<Utc>,
-    pub last_meaningful_use_at: Option<DateTime<Utc>>,
-    pub closed_at: Option<DateTime<Utc>>,
-    pub state_revision: i64,
-    pub metadata: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResidentRef {
-    pub session_id: SessionId,
-    pub reference: CognitiveRef,
-    pub entered_at: DateTime<Utc>,
-    pub entry_reason: String,
-    pub last_meaningful_use_at: Option<DateTime<Utc>>,
-    pub hold_until: Option<DateTime<Utc>>,
-    pub state: ResidentState,
-    pub metadata: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResidentState {
-    Resident,
-    Provisional,
-    Evicted,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConsumerWorkingSet {
-    pub consumer: String,
-    pub refs: Vec<CognitiveRef>,
-    pub contributions: Vec<nous_core::ContextContribution>,
-    pub omitted: Vec<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn retrieval_exposure_is_not_meaningful_use() {
-        assert!(!UseKind::Surfaced.meaningful());
-        assert!(!UseKind::Inspected.meaningful());
-        assert!(UseKind::Referenced.meaningful());
-        assert!(UseKind::ActedOn.meaningful());
-    }
 
     #[test]
     fn explicit_memory_requires_evidence() {

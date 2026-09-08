@@ -179,6 +179,12 @@ impl ObjectStore {
         Ok(bytes)
     }
 
+    pub async fn read_range(&self, hash: &str, start: u64, end: u64) -> Result<Vec<u8>> {
+        if end < start { return Err(Error::Invalid("invalid byte range".into())); }
+        if start == end { return Ok(Vec::new()); }
+        self.operator.read_with(&Self::key(hash)?).range(start..end).await.map(|value| value.to_vec()).map_err(storage_error)
+    }
+
     /// Read CAS bytes in bounded chunks and verify integrity at end of stream.
     pub async fn stream(
         &self,

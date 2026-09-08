@@ -1,7 +1,12 @@
+use nous_authority_store::ProjectionInvalidation;
 use super::support::*;
 use super::*;
 
-impl LocalRuntime {
+impl MemoryService {
+    pub async fn revision(&self, subject: SubjectId, revision: MemoryRevisionId) -> Result<MemoryView> {
+        let memory: Uuid=sqlx::query_scalar("SELECT memory_id FROM memory_revisions WHERE subject_id=$1 AND memory_revision_id=$2").bind(subject.0).bind(revision.0).fetch_one(self.store.pool()).await.map_err(db)?;
+        self.memory(subject,MemoryId(memory),Some(revision)).await
+    }
     pub async fn form_memory(&self, input: ExplicitMemoryInput) -> Result<MemoryView> {
         input.validate()?;
         self.require_subject(input.subject).await?;
@@ -94,7 +99,7 @@ impl LocalRuntime {
         }
         tx.commit().await.map_err(db)?;
         let view = self.memory(input.subject, memory_id, None).await?;
-        self.rebuild_projection(input.subject).await?;
+        self.store.invalidate(input.subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
         Ok(view)
     }
 
@@ -167,7 +172,7 @@ impl LocalRuntime {
                 .map_err(db)?;
         }
         if !proposal.tag_proposals.is_empty() {
-            self.rebuild_projection(subject).await?;
+            self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
         }
         Ok(memory)
     }
@@ -312,7 +317,7 @@ impl LocalRuntime {
         }
         tx.commit().await.map_err(db)?;
         let view = self.memory(input.subject, input.memory_id, None).await?;
-        self.rebuild_projection(input.subject).await?;
+        self.store.invalidate(input.subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
         Ok(view)
     }
 
@@ -335,7 +340,7 @@ impl LocalRuntime {
             .await
             .map_err(db)?;
         let view = self.memory(subject, memory, None).await?;
-        self.rebuild_projection(subject).await?;
+        self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
         Ok(view)
     }
 
@@ -352,7 +357,7 @@ impl LocalRuntime {
             return Err(Error::NotFound("memory not found".into()));
         }
         let view = self.memory(subject, memory, None).await?;
-        self.rebuild_projection(subject).await?;
+        self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
         Ok(view)
     }
 
@@ -497,7 +502,7 @@ impl LocalRuntime {
             }
         }
         drop(guard);
-        self.rebuild_projection(subject).await?;
+        self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
         Ok(())
     }
 

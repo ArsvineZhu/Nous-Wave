@@ -45,6 +45,12 @@ pub struct LexicalGeneration {
 }
 
 impl LexicalGeneration {
+    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        let (schema, ..) = schema();
+        Index::create_in_dir(path.as_ref(), schema)
+            .map_err(|error| Error::Infrastructure(format!("Tantivy create: {error}")))?;
+        Self::open(path)
+    }
     pub fn in_memory() -> Result<Self> {
         let (
             schema,
@@ -122,7 +128,7 @@ impl LexicalGeneration {
         })
     }
 
-    pub fn add_documents(&self, documents: &[LexicalDocument]) -> Result<()> {
+    pub fn add_documents(&mut self, documents: &[LexicalDocument]) -> Result<()> {
         let mut writer: IndexWriter = self
             .index
             .writer(15_000_000)
@@ -155,6 +161,7 @@ impl LexicalGeneration {
         writer
             .commit()
             .map_err(|error| Error::Infrastructure(format!("Tantivy commit: {error}")))?;
+        writer.wait_merging_threads().map_err(|error| Error::Infrastructure(format!("Tantivy finalize: {error}")))?;
         self.reader
             .reload()
             .map_err(|error| Error::Infrastructure(format!("Tantivy reload: {error}")))?;

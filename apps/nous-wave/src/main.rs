@@ -2,7 +2,9 @@ use axum::{Json, Router, extract::State, routing::get};
 use clap::{Parser, Subcommand};
 use nous_core::{DerivationId, Error, MemoryId, Result, SubjectId};
 use nous_memory_domain::ExplicitMemoryInput;
-use nous_memory_service::{CreateSubject, LocalRuntime, RuntimeStatus, UseFeedback};
+use nous_subject_core::{CreateSubject, CharacterSeedInput};
+use nous_cognitive_runtime::UseFeedback;
+use nous_wave::{NousRuntime, RuntimeOptions, RuntimeStatus};
 use postgresql_embedded::{PostgreSQL, SettingsBuilder, VersionReq};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -54,7 +56,7 @@ enum Command {
         #[arg(long)]
         input: PathBuf,
     },
-    ProjectionRebuild {
+    ProjectionsRefresh {
         subject: uuid::Uuid,
     },
     Derivation {
@@ -74,6 +76,8 @@ enum Command {
 #[derive(Subcommand)]
 enum SubjectCommand {
     Create {
+        #[arg(long)]
+        seed: PathBuf,
         #[arg(long)]
         metadata: Option<PathBuf>,
     },
@@ -159,6 +163,8 @@ enum DerivationCommand {
 #[serde(deny_unknown_fields)]
 struct Config {
     server: ServerConfig,
+    #[serde(default = "default_true")]
+    memory_enabled: bool,
     database: DatabaseConfig,
     object_store: ObjectStoreConfig,
     #[serde(default)]
@@ -201,7 +207,7 @@ fn default_max_connections() -> u32 {
     8
 }
 fn default_database_name() -> String {
-    "nous_wave_20260907".into()
+    "nous_wave_20260908".into()
 }
 fn default_install_dir() -> String {
     "./data/postgres-install".into()
@@ -236,36 +242,19 @@ fn default_upload_limit() -> u64 {
 struct RetrievalConfig {
     #[serde(default = "default_resident_limit")]
     resident_limit: usize,
-    #[serde(default)]
-    lexical: ProjectionConfig,
-    #[serde(default)]
-    dense: ProjectionConfig,
-    #[serde(default)]
-    wave: ProjectionConfig,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ProjectionConfig {
+    #[serde(default = "default_serving_root")]
+    root: String,
     #[serde(default = "default_true")]
-    enabled: bool,
-    #[serde(default)]
-    path: String,
+    lexical_enabled: bool,
+    #[serde(default = "default_true")]
+    dense_enabled: bool,
+    #[serde(default = "default_true")]
+    topology_enabled: bool,
 }
-
-fn default_true() -> bool {
-    true
-}
-
+fn default_serving_root() -> String { "./data/serving".into() }
+fn default_true() -> bool { true }
 impl Default for RetrievalConfig {
-    fn default() -> Self {
-        Self {
-            resident_limit: default_resident_limit(),
-            lexical: ProjectionConfig::default(),
-            dense: ProjectionConfig::default(),
-            wave: ProjectionConfig::default(),
-        }
-    }
+    fn default() -> Self { Self { resident_limit: 256, root: default_serving_root(), lexical_enabled:true, dense_enabled:true, topology_enabled:true } }
 }
 
 fn default_resident_limit() -> usize {
@@ -296,17 +285,6 @@ async fn run() -> Result<()> {
         config.database.mode = "external".into();
         config.database.url = url;
     }
-    tracing::debug!(
-        providers = config.providers.len(),
-        configured_capabilities = config.capabilities.len(),
-        lexical_enabled = config.retrieval.lexical.enabled,
-        lexical_path = %config.retrieval.lexical.path,
-        dense_enabled = config.retrieval.dense.enabled,
-        dense_path = %config.retrieval.dense.path,
-        wave_enabled = config.retrieval.wave.enabled,
-        wave_path = %config.retrieval.wave.path,
-        "loaded capability and serving projection configuration"
-    );
     if config.server.remote_access || !config.server.bind.ip().is_loopback() {
         return Err(Error::Invalid(
             "current runtime supports loopback binding only".into(),
@@ -322,15 +300,19 @@ async fn run() -> Result<()> {
         .to_path_buf();
     let (postgres_url, managed) = open_database(&app_root, &config.database).await?;
     let object_root = resolve_path(&app_root, &config.object_store.root);
-    let runtime_result = LocalRuntime::open_with_options(
-        &postgres_url,
-        config.database.max_connections,
-        object_root.to_string_lossy().as_ref(),
-        config.object_store.max_upload_bytes,
-    )
+    let runtime_result = NousRuntime::open(RuntimeOptions {
+        postgres_url,
+        max_connections: config.database.max_connections,
+        object_root: object_root.to_string_lossy().into_owned(),
+        max_upload_bytes: config.object_store.max_upload_bytes,
+        resident_limit: config.retrieval.resident_limit,
+        memory_enabled: config.memory_enabled,
+        serving_options: nous_serving::ServingOptions { root: resolve_path(&app_root, &config.retrieval.root), lexical: config.retrieval.lexical_enabled, dense: config.retrieval.dense_enabled, topology: config.retrieval.topology_enabled, memory_enabled: config.memory_enabled },
+        embedding: None,
+    })
     .await;
     let runtime = match runtime_result {
-        Ok(runtime) => runtime.with_resident_limit(config.retrieval.resident_limit)?,
+        Ok(runtime) => runtime,
         Err(error) => {
             stop_managed(managed).await?;
             return Err(error);
@@ -342,7 +324,7 @@ async fn run() -> Result<()> {
     result
 }
 
-async fn dispatch(command: Command, runtime: LocalRuntime, bind: SocketAddr) -> Result<()> {
+async fn dispatch(command: Command, runtime: NousRuntime, bind: SocketAddr) -> Result<()> {
     match command {
         Command::Serve => {
             let app = Router::new()
@@ -365,37 +347,38 @@ async fn dispatch(command: Command, runtime: LocalRuntime, bind: SocketAddr) -> 
         }
         Command::Status => print_json(runtime.status().await),
         Command::Subject { command } => match command {
-            SubjectCommand::Create { metadata } => {
+            SubjectCommand::Create { seed, metadata } => {
                 let metadata = match metadata {
                     Some(path) => read_json(path).await?,
                     None => serde_json::json!({}),
                 };
                 print_json(
-                    runtime
+                    runtime.subjects
                         .create_subject(CreateSubject {
                             subject_id: None,
-                            metadata,
+                            config: metadata,
+                            character_seed: CharacterSeedInput { text: tokio::fs::read_to_string(&seed).await.map_err(|error| Error::Invalid(error.to_string()))?, media_type: "text/plain; charset=utf-8".into(), provenance: serde_json::json!({"source_path": seed}) },
                         })
                         .await?,
                 )
             }
             SubjectCommand::Show { subject } => {
-                print_json(runtime.subject(SubjectId(subject)).await?)
+                print_json(runtime.subjects.subject(SubjectId(subject)).await?)
             }
         },
         Command::Session { command } => match command {
             SessionCommand::Open { subject } => print_json(
-                runtime
+                runtime.cognition
                     .open_session(SubjectId(subject), serde_json::json!({}))
                     .await?,
             ),
             SessionCommand::Show { subject, session } => print_json(
-                runtime
+                runtime.cognition
                     .session(SubjectId(subject), nous_core::SessionId(session))
                     .await?,
             ),
             SessionCommand::Close { subject, session } => print_json(
-                runtime
+                runtime.cognition
                     .close_session(SubjectId(subject), nous_core::SessionId(session))
                     .await?,
             ),
@@ -408,7 +391,7 @@ async fn dispatch(command: Command, runtime: LocalRuntime, bind: SocketAddr) -> 
         Command::FormMemory { subject, input } => {
             let mut input: ExplicitMemoryInput = read_json(input).await?;
             input.subject = SubjectId(subject);
-            print_json(runtime.form_memory(input).await?)
+            print_json(runtime.require_memory()?.form_memory(input).await?)
         }
         Command::Query { subject, input } => {
             let mut input: nous_core::CognitiveQuery = read_json(input).await?;
@@ -418,20 +401,20 @@ async fn dispatch(command: Command, runtime: LocalRuntime, bind: SocketAddr) -> 
         Command::Use { subject, input } => {
             let mut input: UseFeedback = read_json(input).await?;
             input.subject = SubjectId(subject);
-            runtime.use_feedback(input).await?;
+            runtime.cognition.use_feedback(input).await?;
             print_json(serde_json::json!({"status":"accepted"}))
         }
-        Command::ProjectionRebuild { subject } => {
-            print_json(runtime.rebuild_projection(SubjectId(subject)).await?)
+        Command::ProjectionsRefresh { subject } => {
+            print_json(runtime.serving.refresh(SubjectId(subject)).await?)
         }
         Command::Derivation { command } => match command {
             DerivationCommand::RunPending { limit, owner } => print_json(
-                runtime
+                runtime.material
                     .claim_derivations(limit, &owner, std::time::Duration::from_secs(60))
                     .await?,
             ),
             DerivationCommand::Retry { derivation } => {
-                runtime.retry_derivation(DerivationId(derivation)).await?;
+                runtime.material.retry_derivation(DerivationId(derivation)).await?;
                 print_json(serde_json::json!({"status":"queued"}))
             }
         },
@@ -439,30 +422,30 @@ async fn dispatch(command: Command, runtime: LocalRuntime, bind: SocketAddr) -> 
             MemoryCommand::Form { subject, input } => {
                 let mut input: ExplicitMemoryInput = read_json(input).await?;
                 input.subject = SubjectId(subject);
-                print_json(runtime.form_memory(input).await?)
+                print_json(runtime.require_memory()?.form_memory(input).await?)
             }
             MemoryCommand::Show { subject, memory } => print_json(
-                runtime
+                runtime.require_memory()?
                     .memory(SubjectId(subject), MemoryId(memory), None)
                     .await?,
             ),
             MemoryCommand::History { subject, memory } => print_json(
-                runtime
+                runtime.require_memory()?
                     .memory_history(SubjectId(subject), MemoryId(memory))
                     .await?,
             ),
             MemoryCommand::Suppress { subject, memory } => print_json(
-                runtime
+                runtime.require_memory()?
                     .suppress(SubjectId(subject), MemoryId(memory))
                     .await?,
             ),
             MemoryCommand::Restore { subject, memory } => print_json(
-                runtime
+                runtime.require_memory()?
                     .restore(SubjectId(subject), MemoryId(memory))
                     .await?,
             ),
             MemoryCommand::Purge { subject, memory } => {
-                runtime
+                runtime.require_memory()?
                     .purge_memory(SubjectId(subject), MemoryId(memory))
                     .await?;
                 print_json(serde_json::json!({"status":"purged"}))
@@ -470,15 +453,15 @@ async fn dispatch(command: Command, runtime: LocalRuntime, bind: SocketAddr) -> 
         },
         Command::Resource { command } => match command {
             ResourceCommand::Put { subject, input } => print_json(
-                runtime
+                runtime.cognition
                     .upsert_resource(SubjectId(subject), read_json(input).await?)
                     .await?,
             ),
             ResourceCommand::List { subject } => {
-                print_json(runtime.list_resources(SubjectId(subject)).await?)
+                print_json(runtime.cognition.list_resources(SubjectId(subject)).await?)
             }
             ResourceCommand::Delete { subject, resource } => {
-                runtime
+                runtime.cognition
                     .delete_resource(SubjectId(subject), nous_core::ResourceRef::new(resource)?)
                     .await?;
                 print_json(serde_json::json!({"status":"deleted"}))
@@ -487,7 +470,7 @@ async fn dispatch(command: Command, runtime: LocalRuntime, bind: SocketAddr) -> 
     }
 }
 
-async fn status(State(runtime): State<LocalRuntime>) -> Json<RuntimeStatus> {
+async fn status(State(runtime): State<NousRuntime>) -> Json<RuntimeStatus> {
     Json(runtime.status().await)
 }
 

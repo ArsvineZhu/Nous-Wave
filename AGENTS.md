@@ -7,95 +7,109 @@ Execution contract for Nous Wave.
 ```text
 DevelopmentMode = RAPID_EVOLUTION
 CompatibilityEpoch = PRE_PRODUCTION
-CurrentWave = NOUS_WAVE_PRODUCTION_IMPLEMENTATION_2026-09-07
+Architecture = RollingWave
 ```
 
-Existing code, tests, schemas, names, packages and development history have no preservation privilege. Rewrite directly when the current spec requires it. Do not add compatibility shims, aliases, fallback readers or dual paths without an explicit compatibility obligation.
+Repository history creates no compatibility obligation. Rewrite internal APIs, schemas, crate boundaries and migrations directly when the current architecture requires it. Do not add aliases, shims, fallback readers, dual paths or legacy layers without a real current compatibility obligation.
 
-## Executor role
+## Authority
 
-You implement the active spec/plan. You are not the architecture research owner.
+Read in this order:
 
-If execution reveals a material unresolved semantic/ownership/provider/failure decision, report `PLAN_GAP`. Do not hide uncertainty behind configuration, registries, generic interfaces or frameworks.
+1. `docs/Nous_Wave/ARCHITECTURE.md`
+2. `docs/Nous_Wave/DECISIONS.md`
+3. active implementation handoff/spec
+4. `docs/Nous_Wave/DESIGN_TRANSFER.md`
+5. current implementation
+
+`docs/Nous_Wave/SYSTEM.md` explains behavior but does not override architecture/decisions.
+
+A DEFAULT selected for the active wave may be frozen for execution without becoming permanent architecture.
 
 ## Core invariants
 
 ```text
 Subject != Model
-Character Seed != Persona
+Character Seed != evolved Persona
 Artifact != Memory
+ObservationOccurrence != Artifact
 Message != Memory
 Tool result != Truth
-File format != semantic class
 Retrieved != Reinforced
 Forgetting != Suppression != Purge
-Offline-capable != autonomously scheduled
+Resource awareness != Resource contents
+Serving projection != Cognitive Authority
 MicroSystem != microservice/plugin marketplace
 ```
 
-## Current scope
+Subject Core and Cognitive Runtime are required owners. Memory is an optional cognitive MicroSystem enabled by the reference profile.
 
-Implement [the active Production Implementation Spec](docs/Nous_Wave/Nous_Wave_Production_Implementation_Spec_2026-09-07.md)
-and use the matching [system description](docs/Nous_Wave/Nous_Wave_System_Description_2026-09-07.md) for semantic context.
-The Production Implementation Spec supersedes the historical Memory Product Closure direction and the old portable-release sequence.
+## Executor role
 
-Do not implement Persona, Social, Epistemic, Goals/Commitments, Reflection, Diary or Dream/Simulation internals. Preserve only the documented cross-MicroSystem boundaries.
+Implement the active design. Do not reopen decided architecture during execution.
+
+If implementation reveals a material unresolved semantic/ownership/provider/failure decision, report a narrow `PLAN_GAP`. Do not hide uncertainty behind a registry, framework, policy engine, configuration layer or generic abstraction.
 
 ## Library-first
 
-For generic mechanics, prefer adopted dependencies and standard facilities before custom code.
+Use mature libraries and platform facilities for generic mechanics.
 
-Current routes include:
+Current physical defaults include PostgreSQL/SQLx, OpenDAL, BLAKE3, Tantivy, USearch, petgraph, nalgebra, roaring, Rayon, ArcSwap, Axum and Tokio.
 
-- PostgreSQL + SQLx for canonical structured persistence;
-- USearch for local dense retrieval projection;
-- Tantivy for fielded lexical retrieval;
-- petgraph CSR for immutable topology serving;
-- nalgebra, roaring, Rayon and arc-swap for the specified retrieval mechanics;
-- Apache OpenDAL for object-storage mechanics;
-- Axum/Tokio for service runtime;
-- mature model-service HTTP clients for inference boundaries.
+Dependency count is not a quality metric.
 
-Do not reimplement them merely to reduce dependency count.
+## Algorithm boundaries
 
-A narrow domain-owned processing reconciler is authorized; a generic workflow/job framework is not.
+Stable abstractions represent semantic problem families, not concrete algorithm names.
+
+Current defaults include:
+- EPA/Residual for semantic cue sensing;
+- bounded competitive Wave for associative expansion.
+
+These algorithms may be replaced behind narrow internal traits when justified. Do not create a generic algorithm marketplace or expose implementation-specific algorithm fields in public Cognitive Query semantics.
+
+VCP is research lineage only. Do not copy/transliterate its source code.
 
 ## Architecture discipline
 
-- Domain owners own semantics; storage/index/model libraries own mechanics.
-- Serving projections never become cognitive Authority.
-- Preserve immutable source/provenance and revision lineage.
-- Keep file/source classification axes orthogonal.
-- Do not force arbitrary source material into chat-message or text-chunk shapes.
-- Do not create one universal `CognitiveObject` JSON ontology.
-- Do not quantify cognitive concepts without operational meaning.
-- Do not add a scheduler, cron, wakeup policy or autonomous agent loop.
+- Domain owners own semantics; mature libraries own generic mechanics.
+- Memory must not own Subject Core or generic Cognitive Runtime.
+- Serving projections never become Authority.
+- Preserve immutable provenance and revision lineage.
+- Keep classification axes orthogonal.
+- Do not force arbitrary material into chat-message/text-chunk shapes.
+- Do not create a universal `CognitiveObject` JSON ontology.
+- Do not invent numeric cognitive scales without operational meaning.
+- Do not add a scheduler/cron/self-wakeup loop.
 - Do not create empty future MicroSystem crates.
+- Do not silently drop a design transfer documented in `DESIGN_TRANSFER.md`.
 
-## Performance discipline
+## Repository engineering
 
-Optimize in this order:
+Deterministic mechanical invariants should be automated.
+
+Use:
+- rustfmt;
+- Clippy workspace lints;
+- cargo-deny;
+- cargo-shear;
+- source-shape guard;
+- Just as the task entrypoint.
+
+Large source files are signals, not architecture definitions. A >1000-line Rust source file is blocked by repository policy unless explicitly excluded/generated. Refactor by semantic ownership and independent reasons to change, not arbitrary line slicing.
+
+## Verification
+
+During iteration use the narrowest useful check.
+
+At meaningful integration/acceptance boundaries run:
 
 ```text
-avoid unnecessary work
-→ route to the correct small candidate space
-→ reuse immutable ServingGeneration/Session state
-→ improve candidate quality
-→ improve data structures/indexes
-→ add hot caches
-→ systems-level optimization
+just verify
 ```
 
-Do not add distributed infrastructure to solve an unmeasured local problem.
-
-## Tests
-
-Tests protect meaningful contracts and observed algorithmic risks. TDD is optional.
-
-Do not create product architecture solely for testability. Use real PostgreSQL/SQLx and the selected serving libraries where those mechanics are the claim being tested.
-
-Run focused verification during iteration and the full workspace checks at meaningful stage boundaries.
+Tests protect semantic contracts and observed risks. TDD is optional.
 
 ## Completion
 
-When the authorized Memory implementation and required proof are complete, STOP. Do not automatically start a second cleanup, hardening, compatibility, release or future-MicroSystem pass.
+When the active implementation behavior, repository governance and acceptance proof are complete, remove obsolete execution-stage artifacts and STOP.

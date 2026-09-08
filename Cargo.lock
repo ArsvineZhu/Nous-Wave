@@ -1922,6 +1922,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "nous-authority-store"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nous-core",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "nous-cognitive-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "nous-authority-store",
+ "nous-core",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
 name = "nous-core"
 version = "0.1.0"
 dependencies = [
@@ -1940,6 +1967,25 @@ dependencies = [
  "nous-core",
  "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "nous-material-service"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "futures",
+ "nous-authority-store",
+ "nous-cognitive-runtime",
+ "nous-core",
+ "nous-material",
+ "nous-object-store",
+ "serde",
+ "serde_json",
+ "sqlx",
  "uuid",
 ]
 
@@ -1980,31 +2026,19 @@ dependencies = [
  "blake3",
  "chrono",
  "futures",
+ "nous-authority-store",
+ "nous-cognitive-runtime",
  "nous-core",
  "nous-material",
  "nous-memory-domain",
  "nous-memory-retrieval",
- "nous-memory-store",
  "nous-object-store",
+ "nous-serving",
  "postgresql_embedded",
  "serde",
  "serde_json",
  "sqlx",
  "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "nous-memory-store"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "nous-core",
- "nous-material",
- "nous-memory-domain",
- "serde_json",
- "sqlx",
  "tokio",
  "uuid",
 ]
@@ -2022,17 +2056,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "nous-serving"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "nous-authority-store",
+ "nous-core",
+ "nous-memory-retrieval",
+ "nous-object-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "nous-subject-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nous-authority-store",
+ "nous-core",
+ "nous-object-store",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
 name = "nous-wave"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "chrono",
  "clap",
  "futures",
+ "nous-authority-store",
+ "nous-cognitive-runtime",
  "nous-core",
  "nous-material",
+ "nous-material-service",
  "nous-memory-domain",
  "nous-memory-service",
+ "nous-object-store",
+ "nous-serving",
+ "nous-subject-core",
  "postgresql_embedded",
  "serde",
  "serde_json",
@@ -2620,6 +2692,7 @@ checksum = "18bd8a37d17a58532776dcdf6041ce64929adca78e8489d5cacbafe99229d3e1"
 dependencies = [
  "bytemuck",
  "byteorder",
+ "serde",
 ]
 
 [[package]]

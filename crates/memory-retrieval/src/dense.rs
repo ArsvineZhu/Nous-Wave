@@ -35,6 +35,33 @@ pub struct DenseGeneration {
 }
 
 impl DenseGeneration {
+    pub fn save(&self, path: &std::path::Path) -> Result<()> {
+        self.index.save(path.to_str().ok_or_else(|| Error::Invalid("index path must be UTF-8".into()))?)
+            .map_err(|error| Error::Infrastructure(format!("USearch save: {error}")))
+    }
+
+    pub fn open(path: &std::path::Path, generation_id: ServingGenerationId, space: EmbeddingSpaceSignature, records: Vec<VectorRecord>) -> Result<Self> {
+        let mut generation = Self::new(space, records.len())?;
+        generation.index.load(path.to_str().ok_or_else(|| Error::Invalid("index path must be UTF-8".into()))?)
+            .map_err(|error| Error::Infrastructure(format!("USearch load: {error}")))?;
+        for record in records {
+            if !record.embedding_space.compatible_with(&generation.space) {
+                return Err(Error::Conflict("dense artifact contains an incompatible embedding space".into()));
+            }
+            let mut vector = vec![0.0_f32; generation.space.dimension as usize];
+            let count = generation.index.get(record.serving_doc_id, &mut vector)
+                .map_err(|error| Error::Infrastructure(format!("USearch readback: {error}")))?;
+            if count != 1 { return Err(Error::Infrastructure("dense record is missing from index".into())); }
+            validate_vector(&generation.space, &vector)?;
+            generation.vectors.insert(record.serving_doc_id, vector);
+            generation.records.insert(record.serving_doc_id, record);
+        }
+        if generation.index.size() != generation.records.len() {
+            return Err(Error::Infrastructure("dense index and record manifest disagree".into()));
+        }
+        generation.generation_id = generation_id;
+        Ok(generation)
+    }
     pub fn new(space: EmbeddingSpaceSignature, capacity: usize) -> Result<Self> {
         if space.dimension == 0 {
             return Err(Error::Invalid(

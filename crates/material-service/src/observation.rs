@@ -1,11 +1,11 @@
-use super::support::*;
+use nous_authority_store::database_error as db;
 use super::*;
 
-impl LocalRuntime {
-    pub async fn observe(&self, input: ObservationInput) -> Result<AcceptedObservation> {
-        self.require_subject(input.subject).await?;
+impl MaterialService {
+    pub async fn record_observation(&self, input: ObservationInput) -> Result<AcceptedObservation> {
+        self.store.require_subject(input.subject).await?;
         if let Some(session) = input.session {
-            self.require_session(input.subject, session).await?;
+            self.cognition.require_session(input.subject, session).await?;
         }
         let now = Utc::now();
         let object_guard = if matches!(
@@ -127,111 +127,12 @@ impl LocalRuntime {
             sqlx::query("INSERT INTO coverage_needs(coverage_need_id,subject_id,source_region_id,representation_kind,capability_operation,requirement,state,updated_at) VALUES($1,$2,$3,'extracted_text','document_extraction','preferred',$4,$5) ON CONFLICT(subject_id,source_region_id,representation_kind,capability_operation) DO UPDATE SET updated_at=excluded.updated_at")
                 .bind(Uuid::now_v7()).bind(input.subject.0).bind(region.source_region_id.0).bind(if matches!(input.material, ObservationMaterial::InlineText{..}){"ready"}else{"missing"}).bind(now).execute(&mut *tx).await.map_err(db)?;
         }
+        AuthorityStore::invalidate_in(&mut tx, input.subject, ProjectionInvalidation::text()).await?;
         tx.commit().await.map_err(db)?;
         drop(object_guard);
-        let mut memory_revisions = Vec::new();
-        if matches!(input.formation, FormationDirective::ExplicitSpecific) {
-            let text = match &input.material {
-                ObservationMaterial::InlineText { text, .. } => text.clone(),
-                _ => {
-                    return Err(Error::Invalid(
-                        "explicit formation requires inline text or a supplied representation"
-                            .into(),
-                    ));
-                }
-            };
-            let evidence = vec![MemoryRevisionEvidence {
-                evidence_no: 0,
-                evidence: EvidenceRef::Occurrence { occurrence_id },
-                support_role: SupportRole::Direct,
-                weight: Some(1.0),
-            }];
-            let view = self
-                .form_memory(ExplicitMemoryInput {
-                    subject: input.subject,
-                    memory_class: MemoryClass::Specific,
-                    semantic_role: "episode".into(),
-                    representation_text: text,
-                    title: None,
-                    evidence,
-                    entity_refs: input
-                        .entities
-                        .iter()
-                        .filter_map(|mention| mention.entity_ref.clone())
-                        .collect(),
-                    tags: Vec::new(),
-                    occurred_at: input.occurrence.occurred_at,
-                    observed_at: input.occurrence.observed_at,
-                    valid_from: None,
-                    valid_to: None,
-                    epistemic_class: EpistemicClass::Reported,
-                    confidence: None,
-                })
-                .await?;
-            memory_revisions.push(view.revision.memory_revision_id);
-        } else if matches!(input.formation, FormationDirective::ConsiderSpecific)
-            && let Some(provider) = &self.memory_formation_provider
-        {
-            let text = match &input.material {
-                ObservationMaterial::InlineText { text, .. } => Some(text.clone()),
-                ObservationMaterial::ArtifactRef { artifact_id } => {
-                    let artifact = self.artifact(input.subject, *artifact_id).await?;
-                    self.objects
-                        .get(&artifact.content_hash)
-                        .await
-                        .ok()
-                        .and_then(|bytes| String::from_utf8(bytes).ok())
-                }
-                _ => None,
-            };
-            if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
-                let proposals = provider
-                    .propose(MemoryFormationRequest {
-                        subject: input.subject,
-                        occurrence: occurrence_id,
-                        source_class: input.occurrence.source_class.clone(),
-                        text,
-                        entity_refs: input
-                            .entities
-                            .iter()
-                            .filter_map(|mention| mention.entity_ref.clone())
-                            .collect(),
-                        occurred_at: input.occurrence.occurred_at,
-                        observed_at: input.occurrence.observed_at,
-                    })
-                    .await?;
-                if proposals.len() > 32 {
-                    return Err(Error::Invalid(
-                        "memory formation proposal count exceeds the request bound".into(),
-                    ));
-                }
-                let allowed_entities = input
-                    .entities
-                    .iter()
-                    .filter_map(|mention| mention.entity_ref.clone())
-                    .collect::<Vec<_>>();
-                let mut proposal_keys = HashSet::new();
-                for proposal in proposals {
-                    let normalized = proposal
-                        .representation_text
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .to_lowercase();
-                    let evidence_key = serde_json::to_string(&proposal.evidence)
-                        .map_err(|error| Error::Invalid(error.to_string()))?;
-                    if !proposal_keys.insert(format!("{normalized}\0{evidence_key}")) {
-                        continue;
-                    }
-                    let view = self
-                        .commit_formation_proposal(input.subject, proposal, &allowed_entities)
-                        .await?;
-                    memory_revisions.push(view.revision.memory_revision_id);
-                }
-            }
-        }
+        let memory_revisions = Vec::new();
         if let Some(session) = input.session.filter(|_| input.runtime.admit) {
-            self.admit(
+            self.cognition.admit(
                 session,
                 CognitiveRef::Occurrence(occurrence_id),
                 "observed",
@@ -240,7 +141,7 @@ impl LocalRuntime {
             .await?;
             for mention in &input.entities {
                 if let Some(entity) = &mention.entity_ref {
-                    self.admit(
+                    self.cognition.admit(
                         session,
                         CognitiveRef::Entity(entity.clone()),
                         "observed",
@@ -251,7 +152,7 @@ impl LocalRuntime {
             }
             if let ObservationMaterial::ResourceAvailability { resource } = &input.material {
                 ResourceRef::new(resource.as_str())?;
-                self.admit(
+                self.cognition.admit(
                     session,
                     CognitiveRef::Resource(resource.clone()),
                     "resource_awareness",
@@ -259,16 +160,7 @@ impl LocalRuntime {
                 )
                 .await?;
             }
-            for revision in &memory_revisions {
-                self.admit(
-                    session,
-                    CognitiveRef::MemoryRevision(*revision),
-                    "observed",
-                    input.runtime.hold_until,
-                )
-                .await?;
-            }
-            self.evict_if_needed(session).await?;
+            self.cognition.evict_if_needed(session).await?;
         }
         Ok(AcceptedObservation {
             artifact,
@@ -355,7 +247,7 @@ impl LocalRuntime {
     where
         S: Stream<Item = Result<Vec<u8>>> + Send,
     {
-        self.require_subject(subject).await?;
+        self.store.require_subject(subject).await?;
         let guard = self.objects.reference_guard(false).await?;
         let (hash, size) = self
             .objects
@@ -381,7 +273,7 @@ impl LocalRuntime {
         let artifact = self.artifact(subject, ArtifactId(artifact_id)).await?;
         let observed_at = metadata.observed_at;
         let result = self
-            .observe(ObservationInput {
+            .record_observation(ObservationInput {
                 subject,
                 session: None,
                 occurrence: OccurrenceDescriptor {

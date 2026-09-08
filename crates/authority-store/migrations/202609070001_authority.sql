@@ -288,6 +288,7 @@ CREATE TABLE anchor_support (
 );
 
 CREATE TABLE association_evidence (
+    bridge_hint boolean NOT NULL DEFAULT false,
     association_evidence_id uuid PRIMARY KEY,
     subject_id uuid NOT NULL REFERENCES subjects(subject_id) ON DELETE CASCADE,
     from_ref_kind text NOT NULL,
@@ -398,3 +399,21 @@ CREATE INDEX entity_binding_current_lookup_idx
     ON entity_binding_revisions(mention_id, revision_no DESC);
 CREATE INDEX resident_refs_session_state_idx
     ON resident_refs(session_id, state, last_meaningful_use_at DESC);
+-- Subject initialization source lineage is independent of Memory.
+CREATE TABLE character_seeds (
+    seed_revision_id uuid PRIMARY KEY,
+    subject_id uuid NOT NULL REFERENCES subjects(subject_id),
+    revision_no integer NOT NULL CHECK (revision_no > 0),
+    artifact_id uuid NOT NULL REFERENCES artifacts(artifact_id),
+    media_type text NOT NULL,
+    provenance jsonb NOT NULL,
+    created_at timestamptz NOT NULL,
+    UNIQUE (subject_id, revision_no)
+);
+CREATE TABLE projection_watermarks (
+    subject_id uuid NOT NULL REFERENCES subjects(subject_id) ON DELETE CASCADE,
+    family text NOT NULL,
+    space_signature text NOT NULL DEFAULT '',
+    desired_revision bigint NOT NULL,
+    PRIMARY KEY(subject_id, family, space_signature)
+);

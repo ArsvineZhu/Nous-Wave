@@ -1,0 +1,18 @@
+[package]
+name = "nous-authority-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nous-core.workspace = true
+serde.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true

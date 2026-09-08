@@ -1,0 +1,22 @@
+[package]
+name = "nous-serving"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nous-core.workspace = true
+nous-authority-store.workspace = true
+nous-object-store.workspace = true
+nous-memory-retrieval.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+blake3.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

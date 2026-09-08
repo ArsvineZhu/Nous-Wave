@@ -921,3 +921,6 @@ mod tests {
         assert!(!base.compatible_with(&changed));
     }
 }
+
+mod references;
+pub use references::{parse_reference, reference_parts};

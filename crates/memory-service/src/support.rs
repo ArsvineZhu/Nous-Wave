@@ -1,7 +1,7 @@
 use super::*;
 use sqlx::{Postgres, Row, Transaction};
 
-impl LocalRuntime {
+impl MemoryService {
     pub(crate) async fn validate_evidence(
         &self,
         subject: SubjectId,
@@ -32,95 +32,6 @@ impl LocalRuntime {
         } else {
             Err(Error::NotFound("subject not found".into()))
         }
-    }
-
-    pub(crate) async fn require_session(
-        &self,
-        subject: SubjectId,
-        session: SessionId,
-    ) -> Result<()> {
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cognitive_sessions WHERE subject_id=$1 AND session_id=$2 AND closed_at IS NULL)")
-            .bind(subject.0)
-            .bind(session.0)
-            .fetch_one(self.store.pool())
-            .await
-            .map_err(db)?;
-        if exists {
-            Ok(())
-        } else {
-            Err(Error::NotFound("open session not found".into()))
-        }
-    }
-
-    pub(crate) async fn admit(
-        &self,
-        session: SessionId,
-        reference: CognitiveRef,
-        reason: &str,
-        hold_until: Option<DateTime<Utc>>,
-    ) -> Result<()> {
-        self.admit_with_state(session, reference, reason, hold_until, "resident")
-            .await
-    }
-
-    pub(crate) async fn admit_with_state(
-        &self,
-        session: SessionId,
-        reference: CognitiveRef,
-        reason: &str,
-        hold_until: Option<DateTime<Utc>>,
-        state: &str,
-    ) -> Result<()> {
-        if !matches!(state, "resident" | "provisional") {
-            return Err(Error::Invalid("invalid resident state".into()));
-        }
-        let (kind, value) = reference_parts(&reference);
-        let now = Utc::now();
-        sqlx::query("INSERT INTO resident_refs(session_id,ref_kind,ref_value,entered_at,entry_reason,hold_until,state,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,'{}') ON CONFLICT(session_id,ref_kind,ref_value) DO UPDATE SET state=excluded.state,entry_reason=excluded.entry_reason,hold_until=COALESCE(excluded.hold_until,resident_refs.hold_until)")
-            .bind(session.0).bind(kind).bind(value).bind(now).bind(reason).bind(hold_until).bind(state)
-            .execute(self.store.pool()).await.map_err(db)?;
-        sqlx::query("UPDATE cognitive_sessions SET last_activity_at=$2,state_revision=state_revision+1 WHERE session_id=$1")
-            .bind(session.0).bind(now).execute(self.store.pool()).await.map_err(db)?;
-        Ok(())
-    }
-
-    pub(crate) async fn evict_if_needed(&self, session: SessionId) -> Result<()> {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM resident_refs WHERE session_id=$1 AND state IN ('resident','provisional')",
-        )
-        .bind(session.0)
-        .fetch_one(self.store.pool())
-        .await
-        .map_err(db)?;
-        if count as usize <= self.resident_limit {
-            return Ok(());
-        }
-        let excess = count as usize - self.resident_limit;
-        sqlx::query("WITH victims AS (SELECT session_id,ref_kind,ref_value FROM resident_refs WHERE session_id=$1 AND state IN ('resident','provisional') AND (hold_until IS NULL OR hold_until < now()) ORDER BY (state='provisional') DESC,(last_meaningful_use_at IS NOT NULL) ASC,last_meaningful_use_at ASC NULLS FIRST,entered_at ASC LIMIT $2) UPDATE resident_refs r SET state='evicted' FROM victims v WHERE r.session_id=v.session_id AND r.ref_kind=v.ref_kind AND r.ref_value=v.ref_value")
-            .bind(session.0).bind(excess as i64).execute(self.store.pool()).await.map_err(db)?;
-        Ok(())
-    }
-
-    pub(crate) async fn resident_reference_strings(
-        &self,
-        session: SessionId,
-    ) -> Result<HashSet<String>> {
-        Ok(sqlx::query(
-            "SELECT ref_kind,ref_value FROM resident_refs WHERE session_id=$1 AND state IN ('resident','provisional')",
-        )
-        .bind(session.0)
-        .fetch_all(self.store.pool())
-        .await
-        .map_err(db)?
-        .into_iter()
-        .map(|row| {
-            format!(
-                "{}:{}",
-                row.get::<String, _>("ref_kind"),
-                row.get::<String, _>("ref_value")
-            )
-        })
-        .collect())
     }
 
     pub(crate) async fn memory_has_entities(
@@ -403,105 +314,6 @@ pub(crate) fn decode_evidence(row: sqlx::postgres::PgRow) -> Result<MemoryRevisi
     })
 }
 
-pub(crate) fn decode_resource(
-    subject: SubjectId,
-    row: sqlx::postgres::PgRow,
-) -> Result<ResourceDescriptor> {
-    Ok(ResourceDescriptor {
-        subject_id: subject,
-        resource_ref: ResourceRef::new(row.try_get::<String, _>("resource_ref").map_err(db)?)?,
-        display_label: row.try_get("display_label").map_err(db)?,
-        authority_class: row.try_get("authority_class").map_err(db)?,
-        coverage: row.try_get("coverage").map_err(db)?,
-        query_dimensions: row.try_get("query_dimensions").map_err(db)?,
-        modalities: row.try_get("modalities").map_err(db)?,
-        freshness_policy: row.try_get("freshness_policy").map_err(db)?,
-        access_cost_class: row.try_get("access_cost_class").map_err(db)?,
-        resolver_key: row.try_get("resolver_key").map_err(db)?,
-        readiness: row.try_get("readiness").map_err(db)?,
-        updated_at: row.try_get("updated_at").map_err(db)?,
-    })
-}
-
-pub(crate) fn reference_parts(reference: &CognitiveRef) -> (String, String) {
-    match reference {
-        CognitiveRef::Memory(id) => ("memory".into(), id.0.to_string()),
-        CognitiveRef::MemoryRevision(id) => ("memory_revision".into(), id.0.to_string()),
-        CognitiveRef::Artifact(id) => ("artifact".into(), id.0.to_string()),
-        CognitiveRef::SourceRegion(id) => ("source_region".into(), id.0.to_string()),
-        CognitiveRef::DerivedRepresentation(id) => {
-            ("derived_representation".into(), id.0.to_string())
-        }
-        CognitiveRef::DerivedRegion(id) => ("derived_region".into(), id.0.to_string()),
-        CognitiveRef::Entity(id) => ("entity".into(), id.as_str().into()),
-        CognitiveRef::Tag(id) => ("tag".into(), id.0.to_string()),
-        CognitiveRef::Anchor(id) => ("anchor".into(), id.0.to_string()),
-        CognitiveRef::Resource(id) => ("resource".into(), id.as_str().into()),
-        CognitiveRef::ExternalObject(id) => ("external_object".into(), id.as_str().into()),
-        CognitiveRef::Occurrence(id) => ("occurrence".into(), id.0.to_string()),
-        CognitiveRef::Session(id) => ("session".into(), id.0.to_string()),
-    }
-}
-
-pub(crate) fn parse_reference(kind: &str, value: &str) -> Result<CognitiveRef> {
-    Ok(match kind {
-        "memory" => CognitiveRef::Memory(MemoryId(
-            value
-                .parse()
-                .map_err(|_| Error::Invalid("invalid memory ref".into()))?,
-        )),
-        "memory_revision" => CognitiveRef::MemoryRevision(MemoryRevisionId(
-            value
-                .parse()
-                .map_err(|_| Error::Invalid("invalid memory revision ref".into()))?,
-        )),
-        "artifact" => CognitiveRef::Artifact(ArtifactId(
-            value
-                .parse()
-                .map_err(|_| Error::Invalid("invalid artifact ref".into()))?,
-        )),
-        "source_region" => CognitiveRef::SourceRegion(SourceRegionId(
-            value
-                .parse()
-                .map_err(|_| Error::Invalid("invalid source region ref".into()))?,
-        )),
-        "derived_representation" => CognitiveRef::DerivedRepresentation(DerivedRepresentationId(
-            value
-                .parse()
-                .map_err(|_| Error::Invalid("invalid derived ref".into()))?,
-        )),
-        "derived_region" => CognitiveRef::DerivedRegion(DerivedRegionId(
-            value
-                .parse()
-                .map_err(|_| Error::Invalid("invalid derived region ref".into()))?,
-        )),
-        "entity" => CognitiveRef::Entity(EntityRef::new(value)?),
-        "tag" => CognitiveRef::Tag(TagId(
-            value
-                .parse()
-                .map_err(|_| Error::Invalid("invalid tag ref".into()))?,
-        )),
-        "anchor" => CognitiveRef::Anchor(AnchorId(
-            value
-                .parse()
-                .map_err(|_| Error::Invalid("invalid anchor ref".into()))?,
-        )),
-        "resource" => CognitiveRef::Resource(ResourceRef::new(value)?),
-        "external_object" => CognitiveRef::ExternalObject(ObjectRef::new(value)?),
-        "occurrence" => CognitiveRef::Occurrence(OccurrenceId(
-            value
-                .parse()
-                .map_err(|_| Error::Invalid("invalid occurrence ref".into()))?,
-        )),
-        "session" => CognitiveRef::Session(SessionId(
-            value
-                .parse()
-                .map_err(|_| Error::Invalid("invalid session ref".into()))?,
-        )),
-        _ => return Err(Error::Invalid("unknown reference kind".into())),
-    })
-}
-
 pub(crate) fn parse_memory_class(value: &str) -> Result<MemoryClass> {
     match value {
         "specific" => Ok(MemoryClass::Specific),
@@ -582,42 +394,4 @@ pub(crate) fn interval_overlaps(
     requested.end.is_none_or(|end| candidate_start <= end)
         && requested.start.is_none_or(|start| candidate_end >= start)
 }
-pub(crate) fn wave_node_kind(reference: &CognitiveRef) -> WaveNodeKind {
-    match reference {
-        CognitiveRef::Memory(_) | CognitiveRef::MemoryRevision(_) => WaveNodeKind::Memory,
-        CognitiveRef::Tag(_) => WaveNodeKind::Tag,
-        CognitiveRef::Anchor(_) => WaveNodeKind::Anchor,
-        CognitiveRef::Entity(_) => WaveNodeKind::Entity,
-        CognitiveRef::Resource(_) => WaveNodeKind::Resource,
-        _ => WaveNodeKind::Memory,
-    }
-}
-pub(crate) fn wave_reference_allowed(reference: &CognitiveRef) -> bool {
-    matches!(
-        reference,
-        CognitiveRef::Memory(_)
-            | CognitiveRef::Tag(_)
-            | CognitiveRef::Anchor(_)
-            | CognitiveRef::Entity(_)
-            | CognitiveRef::Resource(_)
-    )
-}
-pub(crate) fn topology_edge(
-    from: &CognitiveRef,
-    to: &CognitiveRef,
-    support_class: &str,
-    association_kind: &str,
-) -> WaveEdgeEvidence {
-    WaveEdgeEvidence {
-        from: from.clone(),
-        to: to.clone(),
-        support_class: support_class.into(),
-        association_kind: association_kind.into(),
-        polarity: "positive".into(),
-        support_value: 1.0,
-        bridge_hint: false,
-    }
-}
-pub(crate) fn db(error: sqlx::Error) -> Error {
-    Error::Infrastructure(error.to_string())
-}
+pub(crate) use nous_authority_store::database_error as db;

@@ -30,16 +30,20 @@ usearch = "=2.26.2"
 tantivy = "=0.26.1"
 petgraph = "=0.8.3"
 nalgebra = "=0.34.1"
-roaring = "=0.11.5"
+roaring = { version = "=0.11.5", features = ["serde"] }
 rayon = "=1.11.0"
 arc-swap = "=1.9.2"
 async-trait = "=0.1.89"
 nous-core = { path = "crates/core" }
+nous-subject-core = { path = "crates/subject-core" }
+nous-cognitive-runtime = { path = "crates/cognitive-runtime" }
 nous-material = { path = "crates/material" }
+nous-material-service = { path = "crates/material-service" }
 nous-object-store = { path = "crates/object-store" }
 nous-memory-domain = { path = "crates/memory-domain" }
-nous-memory-store = { path = "crates/memory-store" }
+nous-authority-store = { path = "crates/authority-store" }
 nous-memory-retrieval = { path = "crates/memory-retrieval" }
+nous-serving = { path = "crates/serving" }
 nous-memory-service = { path = "crates/memory-service" }
 
 [profile.dev]
@@ -47,3 +51,19 @@ debug = 0
 
 [profile.test]
 debug = 0
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+too_many_lines = "warn"
+excessive_nesting = "warn"
+too_many_arguments = "warn"
+type_complexity = "warn"
+large_futures = "warn"
+large_enum_variant = "warn"
+fn_params_excessive_bools = "warn"

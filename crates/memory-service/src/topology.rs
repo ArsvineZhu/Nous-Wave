@@ -1,95 +1,8 @@
+use nous_authority_store::ProjectionInvalidation;
 use super::support::*;
 use super::*;
 
-impl LocalRuntime {
-    pub async fn use_feedback(&self, input: UseFeedback) -> Result<()> {
-        self.require_subject(input.subject).await?;
-        if let Some(session) = input.session_id {
-            self.require_session(input.subject, session).await?;
-        }
-        for event in input.events {
-            if !self
-                .reference_in_subject(input.subject, &event.reference)
-                .await?
-            {
-                return Err(Error::Invalid(
-                    "use feedback reference is outside Subject".into(),
-                ));
-            }
-            let (kind, value) = reference_parts(&event.reference);
-            let now = Utc::now();
-            sqlx::query("INSERT INTO cognitive_use_events(use_event_id,subject_id,session_id,ref_kind,ref_value,use_kind,consumer_ref,occurred_at,context) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
-                .bind(Uuid::now_v7()).bind(input.subject.0).bind(input.session_id.map(|id|id.0)).bind(&kind).bind(&value).bind(event.use_kind.as_str()).bind(&input.consumer).bind(now).bind(event.context).execute(self.store.pool()).await.map_err(db)?;
-            if let Some(session) = input.session_id.filter(|_| event.use_kind.meaningful()) {
-                let updated = sqlx::query("UPDATE resident_refs SET last_meaningful_use_at=$4,state='resident' WHERE session_id=$1 AND ref_kind=$2 AND ref_value=$3")
-                    .bind(session.0).bind(&kind).bind(&value).bind(now).execute(self.store.pool()).await.map_err(db)?;
-                if updated.rows_affected() == 0 {
-                    self.admit_with_state(
-                        session,
-                        event.reference.clone(),
-                        "recalled",
-                        None,
-                        "provisional",
-                    )
-                    .await?;
-                    sqlx::query("UPDATE resident_refs SET last_meaningful_use_at=$4 WHERE session_id=$1 AND ref_kind=$2 AND ref_value=$3")
-                        .bind(session.0)
-                        .bind(&kind)
-                        .bind(&value)
-                        .bind(now)
-                        .execute(self.store.pool())
-                        .await
-                        .map_err(db)?;
-                }
-                sqlx::query("UPDATE cognitive_sessions SET last_activity_at=$2,last_meaningful_use_at=$2,state_revision=state_revision+1 WHERE session_id=$1").bind(session.0).bind(now).execute(self.store.pool()).await.map_err(db)?;
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn upsert_resource(
-        &self,
-        subject: SubjectId,
-        input: ResourceUpsert,
-    ) -> Result<ResourceView> {
-        self.require_subject(subject).await?;
-        ResourceRef::new(input.resource_ref.as_str())?;
-        if input.resolver_key.trim().is_empty() || input.authority_class.trim().is_empty() {
-            return Err(Error::Invalid(
-                "resource resolver_key/authority_class is required".into(),
-            ));
-        }
-        if !matches!(
-            input.readiness.as_str(),
-            "ready" | "degraded" | "unavailable"
-        ) {
-            return Err(Error::Invalid("invalid resource readiness".into()));
-        }
-        sqlx::query("INSERT INTO resources(subject_id,resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,resolver_key,readiness,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(subject_id,resource_ref) DO UPDATE SET display_label=excluded.display_label,authority_class=excluded.authority_class,coverage=excluded.coverage,query_dimensions=excluded.query_dimensions,modalities=excluded.modalities,freshness_policy=excluded.freshness_policy,access_cost_class=excluded.access_cost_class,resolver_key=excluded.resolver_key,readiness=excluded.readiness,updated_at=excluded.updated_at")
-            .bind(subject.0).bind(input.resource_ref.as_str()).bind(input.display_label).bind(input.authority_class).bind(input.coverage).bind(input.query_dimensions).bind(input.modalities).bind(input.freshness_policy).bind(input.access_cost_class).bind(input.resolver_key).bind(input.readiness).bind(Utc::now()).execute(self.store.pool()).await.map_err(db)?;
-        let row=sqlx::query("SELECT resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,resolver_key,readiness,updated_at FROM resources WHERE subject_id=$1 AND resource_ref=$2").bind(subject.0).bind(input.resource_ref.as_str()).fetch_one(self.store.pool()).await.map_err(db)?;
-        self.rebuild_projection(subject).await?;
-        Ok(ResourceView {
-            descriptor: decode_resource(subject, row)?,
-        })
-    }
-
-    pub async fn delete_resource(&self, subject: SubjectId, resource: ResourceRef) -> Result<()> {
-        sqlx::query("DELETE FROM resources WHERE subject_id=$1 AND resource_ref=$2")
-            .bind(subject.0)
-            .bind(resource.as_str())
-            .execute(self.store.pool())
-            .await
-            .map_err(db)?;
-        sqlx::query("DELETE FROM resident_refs WHERE ref_kind='resource' AND ref_value=$1")
-            .bind(resource.as_str())
-            .execute(self.store.pool())
-            .await
-            .map_err(db)?;
-        self.rebuild_projection(subject).await?;
-        Ok(())
-    }
-
+impl MemoryService {
     pub async fn create_tag(&self, subject: SubjectId, input: CreateTagRequest) -> Result<Tag> {
         self.require_subject(subject).await?;
         if input.label.trim().is_empty() {
@@ -119,7 +32,7 @@ impl LocalRuntime {
             .await
             .map_err(db)?;
         tx.commit().await.map_err(db)?;
-        self.rebuild_projection(subject).await?;
+        self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
         Ok(Tag {
             tag_id,
             subject_id: subject,
@@ -199,7 +112,7 @@ impl LocalRuntime {
                 .bind(revision_id).bind(kind).bind(value).bind(support.role).execute(&mut *tx).await.map_err(db)?;
         }
         tx.commit().await.map_err(db)?;
-        self.rebuild_projection(subject).await?;
+        self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
         Ok(Anchor {
             anchor_id,
             subject_id: subject,
@@ -319,7 +232,7 @@ impl LocalRuntime {
             created_at: now,
             revoked_at: None,
         };
-        self.rebuild_projection(subject).await?;
+        self.store.invalidate(subject, ProjectionInvalidation::topology()).await?;
         Ok(result)
     }
 
@@ -360,139 +273,8 @@ impl LocalRuntime {
             .bind(input.mention_id).fetch_one(self.store.pool()).await.map_err(db)?;
         sqlx::query("INSERT INTO entity_binding_revisions(binding_revision_id,mention_id,revision_no,entity_ref,binding_state,host_resolution_ref,reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
             .bind(Uuid::now_v7()).bind(input.mention_id).bind(next).bind(input.entity_ref.as_ref().map(EntityRef::as_str)).bind(input.binding_state).bind(input.host_resolution_ref).bind(input.reason).bind(Utc::now()).execute(self.store.pool()).await.map_err(db)?;
-        self.rebuild_projection(subject).await?;
+        self.store.invalidate(subject, ProjectionInvalidation::identity()).await?;
         Ok(())
     }
 
-    pub async fn list_resources(&self, subject: SubjectId) -> Result<Vec<ResourceView>> {
-        let rows=sqlx::query("SELECT resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,resolver_key,readiness,updated_at FROM resources WHERE subject_id=$1 ORDER BY resource_ref").bind(subject.0).fetch_all(self.store.pool()).await.map_err(db)?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(ResourceView {
-                    descriptor: decode_resource(subject, row)?,
-                })
-            })
-            .collect()
-    }
-
-    pub(crate) async fn resource_actions_for_query(
-        &self,
-        query: &CognitiveQuery,
-    ) -> Result<(Vec<ResourceActionSuggestion>, Vec<Degradation>)> {
-        if query.resources.current_authority == CurrentAuthorityNeed::None {
-            return Ok((Vec::new(), Vec::new()));
-        }
-        let requested = query
-            .cues
-            .iter()
-            .filter_map(|cue| match cue {
-                Cue::Resource(resource) => Some(resource.resource.as_str()),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        let resources = self.list_resources(query.subject).await?;
-        let resolvers = self
-            .resource_resolvers
-            .read()
-            .map_err(|_| Error::Infrastructure("resource resolver lock poisoned".into()))?
-            .clone();
-        let mut actions = Vec::new();
-        let mut degradation = Vec::new();
-        for resource in resources {
-            let descriptor = resource.descriptor;
-            if descriptor.readiness != "ready"
-                || (!requested.is_empty() && !requested.contains(descriptor.resource_ref.as_str()))
-            {
-                continue;
-            }
-            let Some(resolver) = resolvers.get(&descriptor.resolver_key).cloned() else {
-                if query.resources.current_authority == CurrentAuthorityNeed::Required {
-                    return Err(Error::Unavailable(format!(
-                        "resource resolver '{}' is unavailable",
-                        descriptor.resolver_key
-                    )));
-                }
-                degradation.push(Degradation {
-                    code: "resource_unavailable".into(),
-                    detail: Some(format!(
-                        "resolver '{}' is not registered",
-                        descriptor.resolver_key
-                    )),
-                });
-                continue;
-            };
-            let result = resolver
-                .query(
-                    &descriptor.resource_ref,
-                    ResourceQuery {
-                        dimensions: descriptor.query_dimensions.clone(),
-                        synopsis_only: false,
-                        limit: query.result_need.limit,
-                    },
-                )
-                .await;
-            match result {
-                Ok(result) => {
-                    if !result.current_authority {
-                        if query.resources.current_authority == CurrentAuthorityNeed::Required {
-                            return Err(Error::Unavailable(
-                                "resource resolver did not return current authority".into(),
-                            ));
-                        }
-                        degradation.push(Degradation {
-                            code: "resource_unavailable".into(),
-                            detail: Some(
-                                "resolver returned a historical or non-authoritative result".into(),
-                            ),
-                        });
-                    }
-                    if let Some(detail) = result.degraded {
-                        degradation.push(Degradation {
-                            code: "resource_unavailable".into(),
-                            detail: Some(detail),
-                        });
-                    }
-                    actions.push(ResourceActionSuggestion {
-                        resource: descriptor.resource_ref,
-                        action: "query_current_authority".into(),
-                        reason: format!(
-                            "resolver returned {} current records",
-                            result.records.len()
-                        ),
-                        current_authority: result.current_authority,
-                        records: result.records,
-                        evidence: if query.result_need.need_evidence {
-                            result.evidence
-                        } else {
-                            Vec::new()
-                        },
-                    });
-                }
-                Err(error)
-                    if query.resources.current_authority == CurrentAuthorityNeed::Required =>
-                {
-                    return Err(Error::Unavailable(format!(
-                        "current resource authority query failed: {error}"
-                    )));
-                }
-                Err(error) => degradation.push(Degradation {
-                    code: "resource_unavailable".into(),
-                    detail: Some(error.to_string()),
-                }),
-            }
-        }
-        if query.resources.current_authority == CurrentAuthorityNeed::Required && actions.is_empty()
-        {
-            return Err(Error::Unavailable(
-                "required current resource authority is unavailable".into(),
-            ));
-        }
-        if query.resources.current_authority == CurrentAuthorityNeed::Prefer && actions.is_empty() {
-            degradation.push(Degradation {
-                code: "resource_unavailable".into(),
-                detail: Some("no ready matching current resource authority".into()),
-            });
-        }
-        Ok((actions, degradation))
-    }
 }

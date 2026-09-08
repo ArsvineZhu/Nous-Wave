@@ -1,6 +1,6 @@
 use crate::*;
-use nous_core::*;
 use database_error as db;
+use nous_core::*;
 
 impl AuthorityStore {
     pub async fn require_subject(&self, subject: SubjectId) -> Result<()> {
@@ -53,4 +53,5 @@ impl AuthorityStore {
         } else {
             Err(Error::NotFound("cognitive reference not found".into()))
         }
-    }}
+    }
+}

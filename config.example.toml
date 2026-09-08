@@ -1,3 +1,5 @@
+memory_enabled = true
+
 [server]
 bind = "127.0.0.1:9470"
 remote_access = false
@@ -6,7 +8,7 @@ remote_access = false
 mode = "managed"
 url = ""
 max_connections = 8
-name = "nous_wave_20260907"
+name = "nous_wave_20260908"
 install_dir = "./data/postgres-install"
 data_dir = "./data/postgres"
 
@@ -17,22 +19,7 @@ max_upload_bytes = 8589934592
 
 [retrieval]
 resident_limit = 256
-
-[retrieval.lexical]
-enabled = true
-path = "./data/lexical"
-
-[retrieval.dense]
-enabled = true
-path = "./data/dense"
-
-[retrieval.wave]
-enabled = true
-path = "./data/wave"
-
-# Providers are startup-composed capability adapters. Empty means zero-model
-# startup: Authority, exact, structured, runtime and deterministic topology
-# operations remain available.
-[providers]
-
-[capabilities]
+root = "./data/serving"
+lexical_enabled = true
+dense_enabled = true
+topology_enabled = true

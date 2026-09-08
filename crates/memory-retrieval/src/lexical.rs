@@ -161,7 +161,9 @@ impl LexicalGeneration {
         writer
             .commit()
             .map_err(|error| Error::Infrastructure(format!("Tantivy commit: {error}")))?;
-        writer.wait_merging_threads().map_err(|error| Error::Infrastructure(format!("Tantivy finalize: {error}")))?;
+        writer
+            .wait_merging_threads()
+            .map_err(|error| Error::Infrastructure(format!("Tantivy finalize: {error}")))?;
         self.reader
             .reload()
             .map_err(|error| Error::Infrastructure(format!("Tantivy reload: {error}")))?;

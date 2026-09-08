@@ -2,14 +2,23 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextBudget { pub max_items: usize, pub max_text_bytes: usize }
+pub struct ContextBudget {
+    pub max_items: usize,
+    pub max_text_bytes: usize,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ContextBudgetUsage { pub items: usize, pub text_bytes: usize }
+pub struct ContextBudgetUsage {
+    pub items: usize,
+    pub text_bytes: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all="snake_case")]
-pub enum MaterializationPolicy { ReferencesOnly, AvailableText }
+#[serde(rename_all = "snake_case")]
+pub enum MaterializationPolicy {
+    ReferencesOnly,
+    AvailableText,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsumerProfile {
@@ -24,8 +33,10 @@ pub struct WorkingSetRequest {
     pub subject: SubjectId,
     pub session_id: SessionId,
     pub consumer: ConsumerProfile,
-    #[serde(default)] pub query_results: Vec<CognitiveHit>,
-    #[serde(default)] pub references: Vec<CognitiveRef>,
+    #[serde(default)]
+    pub query_results: Vec<CognitiveHit>,
+    #[serde(default)]
+    pub references: Vec<CognitiveRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,52 +59,148 @@ pub struct ContextSource {
 
 #[async_trait::async_trait]
 pub trait ContextResolver: Send + Sync {
-    async fn context_source(&self, subject: SubjectId, reference: &CognitiveRef, max_bytes: usize) -> Result<ContextSource>;
+    async fn context_source(
+        &self,
+        subject: SubjectId,
+        reference: &CognitiveRef,
+        max_bytes: usize,
+    ) -> Result<ContextSource>;
 }
 
 impl CognitiveRuntimeService {
-    pub async fn working_set(&self, request: WorkingSetRequest, resolver: &dyn ContextResolver) -> Result<ConsumerWorkingSet> {
-        let profile=&request.consumer;
-        if profile.consumer_id.trim().is_empty() || profile.context_budget.max_items==0 || profile.context_budget.max_items>2048 {
-            return Err(Error::Invalid("consumer identity and a bounded context item budget are required".into()));
+    pub async fn working_set(
+        &self,
+        request: WorkingSetRequest,
+        resolver: &dyn ContextResolver,
+    ) -> Result<ConsumerWorkingSet> {
+        let profile = &request.consumer;
+        if profile.consumer_id.trim().is_empty()
+            || profile.context_budget.max_items == 0
+            || profile.context_budget.max_items > 2048
+        {
+            return Err(Error::Invalid(
+                "consumer identity and a bounded context item budget are required".into(),
+            ));
         }
-        self.require_session(request.subject,request.session_id).await?;
-        let mut references=request.query_results.iter().map(|hit|hit.reference.clone()).chain(request.references).collect::<Vec<_>>();
-        references.extend(self.session(request.subject,request.session_id).await?.resident.into_iter().rev().map(|resident|resident.reference));
-        let mut seen=HashSet::new();
-        let mut result=ConsumerWorkingSet { session_id:request.session_id,consumer_id:profile.consumer_id.clone(),refs:Vec::new(),contributions:Vec::new(),budget_used:ContextBudgetUsage::default(),degradation:Vec::new() };
+        self.require_session(request.subject, request.session_id)
+            .await?;
+        let mut references = request
+            .query_results
+            .iter()
+            .map(|hit| hit.reference.clone())
+            .chain(request.references)
+            .collect::<Vec<_>>();
+        references.extend(
+            self.session(request.subject, request.session_id)
+                .await?
+                .resident
+                .into_iter()
+                .rev()
+                .map(|resident| resident.reference),
+        );
+        let mut seen = HashSet::new();
+        let mut result = ConsumerWorkingSet {
+            session_id: request.session_id,
+            consumer_id: profile.consumer_id.clone(),
+            refs: Vec::new(),
+            contributions: Vec::new(),
+            budget_used: ContextBudgetUsage::default(),
+            degradation: Vec::new(),
+        };
         for reference in references {
-            if !seen.insert(reference.clone()) { continue; }
-            if result.budget_used.items>=profile.context_budget.max_items { break; }
-            self.store.validate_reference(request.subject,&reference).await?;
-            let remaining=profile.context_budget.max_text_bytes.saturating_sub(result.budget_used.text_bytes);
-            let source=match resolver.context_source(request.subject,&reference,if profile.materialization_policy==MaterializationPolicy::AvailableText { remaining } else {0}).await {
-                Ok(source)=>source,
-                Err(error)=>{ result.degradation.push(Degradation { code:"context_source_unavailable".into(),detail:Some(error.to_string()) }); continue; }
+            if !seen.insert(reference.clone()) {
+                continue;
+            }
+            if result.budget_used.items >= profile.context_budget.max_items {
+                break;
+            }
+            self.store
+                .validate_reference(request.subject, &reference)
+                .await?;
+            let remaining = profile
+                .context_budget
+                .max_text_bytes
+                .saturating_sub(result.budget_used.text_bytes);
+            let source = match resolver
+                .context_source(
+                    request.subject,
+                    &reference,
+                    if profile.materialization_policy == MaterializationPolicy::AvailableText {
+                        remaining
+                    } else {
+                        0
+                    },
+                )
+                .await
+            {
+                Ok(source) => source,
+                Err(error) => {
+                    result.degradation.push(Degradation {
+                        code: "context_source_unavailable".into(),
+                        detail: Some(error.to_string()),
+                    });
+                    continue;
+                }
             };
-            if !profile.accepted_modalities.contains(&modality(&source.media_type)) { continue; }
-            let text=if profile.materialization_policy==MaterializationPolicy::AvailableText { source.text.map(|text| bounded_text(text,remaining)) } else {None};
-            result.budget_used.text_bytes+=text.as_ref().map_or(0,String::len);
-            result.budget_used.items+=1;
+            if !profile
+                .accepted_modalities
+                .contains(&modality(&source.media_type))
+            {
+                continue;
+            }
+            let text = if profile.materialization_policy == MaterializationPolicy::AvailableText {
+                source.text.map(|text| bounded_text(text, remaining))
+            } else {
+                None
+            };
+            result.budget_used.text_bytes += text.as_ref().map_or(0, String::len);
+            result.budget_used.items += 1;
             result.refs.push(reference.clone());
-            result.contributions.push(ContextContribution { reference:reference.clone(),semantic_role:"context_evidence".into(),text,authority:source.authority,freshness:FreshnessDescriptor { observed_at:None,valid_from:None,valid_to:None },evidence:source.evidence,provenance:source.provenance,priority:1.0,estimated_tokens:None,materialization:Some(MaterializationHandle { reference,level:"source".into() }) });
+            result.contributions.push(ContextContribution {
+                reference: reference.clone(),
+                semantic_role: "context_evidence".into(),
+                text,
+                authority: source.authority,
+                freshness: FreshnessDescriptor {
+                    observed_at: None,
+                    valid_from: None,
+                    valid_to: None,
+                },
+                evidence: source.evidence,
+                provenance: source.provenance,
+                priority: 1.0,
+                estimated_tokens: None,
+                materialization: Some(MaterializationHandle {
+                    reference,
+                    level: "source".into(),
+                }),
+            });
         }
         Ok(result)
     }
 }
 
 pub fn modality(media: &str) -> Modality {
-    if media.starts_with("text/") {Modality::Text}
-    else if media.starts_with("image/") {Modality::Image}
-    else if media.starts_with("audio/") {Modality::Audio}
-    else if media.starts_with("video/") {Modality::Video}
-    else if media.contains("json") || media.contains("xml") {Modality::Structured}
-    else {Modality::Binary}
+    if media.starts_with("text/") {
+        Modality::Text
+    } else if media.starts_with("image/") {
+        Modality::Image
+    } else if media.starts_with("audio/") {
+        Modality::Audio
+    } else if media.starts_with("video/") {
+        Modality::Video
+    } else if media.contains("json") || media.contains("xml") {
+        Modality::Structured
+    } else {
+        Modality::Binary
+    }
 }
 
 pub fn bounded_text(mut text: String, max_bytes: usize) -> String {
-    let mut end=text.len().min(max_bytes);
-    while !text.is_char_boundary(end) {end-=1;}
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
     text.truncate(end);
     text
 }

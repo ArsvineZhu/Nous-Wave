@@ -46,5 +46,4 @@ impl CognitiveRuntimeService {
         }
         Ok(())
     }
-
 }

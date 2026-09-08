@@ -4,18 +4,19 @@ mod embedding;
 mod support;
 
 use chrono::{DateTime, Utc};
+use nous_authority_store::AuthorityStore;
+pub use nous_cognitive_runtime::{
+    ResidentView, ResourceMaterial, ResourceQuery, ResourceQueryResult, ResourceResolver,
+    ResourceUpsert, ResourceView, SessionView, UseFeedback, UseFeedbackEvent,
+};
 use nous_core::*;
-pub use nous_cognitive_runtime::{SessionView, ResidentView, UseFeedback, UseFeedbackEvent, ResourceUpsert, ResourceView, ResourceQuery, ResourceQueryResult, ResourceMaterial, ResourceResolver};
 use nous_memory_domain::*;
 use nous_memory_retrieval::{
     CandidateRankInput, CandidateSemanticTrail, CandidateTopologyObservation, DenseGeneration,
-    EpaBasisGeneration, ExactPostings, LexicalDocument, LexicalGeneration, ResidualConfig,
-    ServingPublisher, ServingSnapshot, SourceSeed, TrailOrder, VectorRecord, WaveConfig,
-    WaveEdgeEvidence, WaveGraphGeneration, WaveNode, WaveNodeKind, bounded_restart_field,
-    build_epa_basis, observe_epa, propagate, rank_candidates, residual_pyramid_with_search,
+    ResidualConfig, SourceSeed, TrailOrder, WaveGraphGeneration, bounded_restart_field,
+    observe_epa, propagate, rank_candidates, residual_pyramid_with_search,
     trail_topology_observation, wave_observability,
 };
-use nous_authority_store::AuthorityStore;
 use nous_object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -26,9 +27,9 @@ use std::{
 use uuid::Uuid;
 
 pub use embedding::{MemoryFormationProvider, MemoryFormationRequest};
-use nous_serving::{TextEmbeddingOutput, TextEmbeddingRequest};
 pub use nous_core::{CognitiveQuery, CognitiveQueryResult};
 pub use nous_material::{AcceptedObservation, ObservationInput, ObservationMaterial};
+use nous_serving::TextEmbeddingRequest;
 
 #[derive(Clone)]
 pub struct MemoryService {
@@ -132,5 +133,8 @@ pub struct RebindEntityRequest {
 
 mod memory;
 mod query;
+mod query_evidence;
+mod query_helpers;
+mod query_projection;
 mod runtime;
 mod topology;

@@ -1,13 +1,30 @@
 mod types;
-pub use types::*;
 use crate::*;
-use sqlx::Row;
 use nous_authority_store::database_error as db;
+use sqlx::Row;
+pub use types::*;
 
 impl CognitiveRuntimeService {
-    pub async fn materialize_resource(&self, subject: SubjectId, resource: &ResourceRef, handle: &str) -> Result<ResourceMaterial> {
-        let descriptor = self.list_resources(subject).await?.into_iter().find(|view| view.descriptor.resource_ref==*resource).ok_or_else(||Error::NotFound("Resource not found".into()))?.descriptor;
-        let resolver=self.resource_resolvers.read().map_err(|_|Error::Infrastructure("resource resolver lock poisoned".into()))?.get(&descriptor.resolver_key).cloned().ok_or_else(||Error::Unavailable("Resource resolver is unavailable".into()))?;
+    pub async fn materialize_resource(
+        &self,
+        subject: SubjectId,
+        resource: &ResourceRef,
+        handle: &str,
+    ) -> Result<ResourceMaterial> {
+        let descriptor = self
+            .list_resources(subject)
+            .await?
+            .into_iter()
+            .find(|view| view.descriptor.resource_ref == *resource)
+            .ok_or_else(|| Error::NotFound("Resource not found".into()))?
+            .descriptor;
+        let resolver = self
+            .resource_resolvers
+            .read()
+            .map_err(|_| Error::Infrastructure("resource resolver lock poisoned".into()))?
+            .get(&descriptor.resolver_key)
+            .cloned()
+            .ok_or_else(|| Error::Unavailable("Resource resolver is unavailable".into()))?;
         resolver.materialize(handle).await
     }
     pub async fn upsert_resource(
@@ -62,11 +79,15 @@ impl CognitiveRuntimeService {
             .collect()
     }
 
+    // Resource routing keeps capability, authority and degradation semantics together.
+    #[allow(clippy::too_many_lines)]
     pub async fn resource_actions_for_query(
         &self,
         query: &CognitiveQuery,
     ) -> Result<(Vec<ResourceActionSuggestion>, Vec<Degradation>)> {
-        if query.resources.current_authority == CurrentAuthorityNeed::None {
+        if query.resources.current_authority == CurrentAuthorityNeed::None
+            && !query.resources.synopsis_only
+        {
             return Ok((Vec::new(), Vec::new()));
         }
         let requested = query
@@ -113,19 +134,21 @@ impl CognitiveRuntimeService {
                     &descriptor.resource_ref,
                     ResourceQuery {
                         dimensions: descriptor.query_dimensions.clone(),
-                        synopsis_only: false,
+                        synopsis_only: query.resources.synopsis_only,
                         limit: query.result_need.limit,
                     },
                 )
                 .await;
             match result {
                 Ok(result) => {
+                    if !result.current_authority
+                        && query.resources.current_authority == CurrentAuthorityNeed::Required
+                    {
+                        return Err(Error::Unavailable(
+                            "resource resolver did not return current authority".into(),
+                        ));
+                    }
                     if !result.current_authority {
-                        if query.resources.current_authority == CurrentAuthorityNeed::Required {
-                            return Err(Error::Unavailable(
-                                "resource resolver did not return current authority".into(),
-                            ));
-                        }
                         degradation.push(Degradation {
                             code: "resource_unavailable".into(),
                             detail: Some(
@@ -181,7 +204,8 @@ impl CognitiveRuntimeService {
             });
         }
         Ok((actions, degradation))
-    }}
+    }
+}
 
 pub(crate) fn decode_resource(
     subject: SubjectId,

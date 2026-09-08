@@ -1930,7 +1930,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
- "tokio",
  "uuid",
 ]
 
@@ -1995,7 +1994,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "nous-core",
- "nous-material",
  "serde",
  "serde_json",
  "uuid",
@@ -2006,6 +2004,7 @@ name = "nous-memory-retrieval"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "blake3",
  "nalgebra",
  "nous-core",
  "petgraph",
@@ -2023,9 +2022,7 @@ name = "nous-memory-service"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "blake3",
  "chrono",
- "futures",
  "nous-authority-store",
  "nous-cognitive-runtime",
  "nous-core",
@@ -2034,12 +2031,9 @@ dependencies = [
  "nous-memory-retrieval",
  "nous-object-store",
  "nous-serving",
- "postgresql_embedded",
  "serde",
  "serde_json",
  "sqlx",
- "tempfile",
- "tokio",
  "uuid",
 ]
 
@@ -2108,7 +2102,6 @@ dependencies = [
  "postgresql_embedded",
  "serde",
  "serde_json",
- "sqlx",
  "tempfile",
  "tokio",
  "toml",

@@ -84,7 +84,6 @@ pub enum ResidentState {
     Evicted,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionView {
     pub session_id: SessionId,
@@ -123,7 +122,6 @@ pub struct UseFeedbackEvent {
     #[serde(default)]
     pub context: serde_json::Value,
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -47,7 +47,10 @@ impl ServingPublisher {
         let generation = self.next_generation();
         self.current.rcu(|current| {
             let mut next = current.as_ref().clone();
-            let mut snapshot = next.get(&subject).map(|snapshot| snapshot.as_ref().clone()).unwrap_or_default();
+            let mut snapshot = next
+                .get(&subject)
+                .map(|snapshot| snapshot.as_ref().clone())
+                .unwrap_or_default();
             update(&mut snapshot);
             snapshot.generation = generation;
             next.insert(subject, Arc::new(snapshot));

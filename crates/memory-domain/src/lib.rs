@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use nous_core::{
     AnchorId, CognitiveRef, EntityRef, EpistemicClass, Error, MemoryId, MemoryRevisionId,
-    OccurrenceId, Result, SessionId, SourceRegionId, SubjectId, TagId,
+    OccurrenceId, Result, SourceRegionId, SubjectId, TagId,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

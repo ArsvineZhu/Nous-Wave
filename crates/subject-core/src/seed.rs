@@ -16,12 +16,16 @@ pub struct CharacterSeedInput {
     pub provenance: serde_json::Value,
 }
 
-fn text_media_type() -> String { "text/plain; charset=utf-8".into() }
+fn text_media_type() -> String {
+    "text/plain; charset=utf-8".into()
+}
 
 impl CharacterSeedInput {
     pub fn validate(&self) -> Result<()> {
         if self.text.trim().is_empty() || self.media_type.trim().is_empty() {
-            return Err(Error::Invalid("Character Seed text and media type are required".into()));
+            return Err(Error::Invalid(
+                "Character Seed text and media type are required".into(),
+            ));
         }
         Ok(())
     }
@@ -59,25 +63,44 @@ pub(super) async fn insert_seed(
 }
 
 impl SubjectCoreService {
-    pub async fn revise_character_seed(&self, subject: SubjectId, input: CharacterSeedInput) -> Result<CharacterSeedView> {
+    pub async fn revise_character_seed(
+        &self,
+        subject: SubjectId,
+        input: CharacterSeedInput,
+    ) -> Result<CharacterSeedView> {
         input.validate()?;
         self.subject(subject).await?;
         let guard = self.objects.reference_guard(false).await?;
         let hash = self.objects.put(input.text.as_bytes().to_vec()).await?;
         let mut tx = self.store.begin().await?;
         sqlx::query("SELECT subject_id FROM subjects WHERE subject_id=$1 FOR UPDATE")
-            .bind(subject.0).fetch_one(&mut *tx).await.map_err(db)?;
-        let next: i32 = sqlx::query_scalar("SELECT COALESCE(max(revision_no),0)+1 FROM character_seeds WHERE subject_id=$1")
-            .bind(subject.0).fetch_one(&mut *tx).await.map_err(db)?;
+            .bind(subject.0)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db)?;
+        let next: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(max(revision_no),0)+1 FROM character_seeds WHERE subject_id=$1",
+        )
+        .bind(subject.0)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db)?;
         let revision = insert_seed(&mut tx, subject, input, hash, next).await?;
         sqlx::query("UPDATE subjects SET state_revision=state_revision+1 WHERE subject_id=$1")
-            .bind(subject.0).execute(&mut *tx).await.map_err(db)?;
+            .bind(subject.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
         tx.commit().await.map_err(db)?;
         drop(guard);
         self.character_seed(subject, Some(revision)).await
     }
 
-    pub async fn character_seed(&self, subject: SubjectId, revision: Option<Uuid>) -> Result<CharacterSeedView> {
+    pub async fn character_seed(
+        &self,
+        subject: SubjectId,
+        revision: Option<Uuid>,
+    ) -> Result<CharacterSeedView> {
         let row = sqlx::query("SELECT s.seed_revision_id,s.revision_no,s.artifact_id,s.media_type,s.provenance,s.created_at,a.content_hash FROM character_seeds s JOIN artifacts a USING(artifact_id) WHERE s.subject_id=$1 AND ($2::uuid IS NULL OR s.seed_revision_id=$2) ORDER BY s.revision_no DESC LIMIT 1")
             .bind(subject.0).bind(revision).fetch_optional(self.store.pool()).await.map_err(db)?
             .ok_or_else(|| Error::NotFound("Character Seed revision not found".into()))?;

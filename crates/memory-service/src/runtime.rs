@@ -1,8 +1,20 @@
 use super::*;
 
 impl MemoryService {
-    pub fn new(store: AuthorityStore, objects: ObjectStore, cognition: nous_cognitive_runtime::CognitiveRuntimeService, serving: nous_serving::ServingService) -> Self {
-        Self { store, objects, cognition, serving, capabilities: Arc::new(Vec::new()), memory_formation_provider: None }
+    pub fn new(
+        store: AuthorityStore,
+        objects: ObjectStore,
+        cognition: nous_cognitive_runtime::CognitiveRuntimeService,
+        serving: nous_serving::ServingService,
+    ) -> Self {
+        Self {
+            store,
+            objects,
+            cognition,
+            serving,
+            capabilities: Arc::new(Vec::new()),
+            memory_formation_provider: None,
+        }
     }
 
     pub fn with_capabilities(mut self, capabilities: Vec<CapabilityDescriptor>) -> Self {
@@ -103,5 +115,4 @@ impl MemoryService {
             serving_generation: self.serving.publisher.snapshot().generation,
         }
     }
-
 }

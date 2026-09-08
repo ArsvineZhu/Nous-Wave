@@ -1,4 +1,4 @@
-mod plan;
 mod orchestrate;
-pub use plan::{QueryPlan, WorkCycle};
+mod plan;
 pub use orchestrate::CognitiveContributor;
+pub use plan::{QueryPlan, WorkCycle};

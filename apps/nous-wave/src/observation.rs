@@ -6,9 +6,13 @@ use nous_memory_service::MemoryFormationRequest;
 use std::collections::HashSet;
 
 impl NousRuntime {
+    // Host-selected formation follows the already-committed runtime admission.
+    #[allow(clippy::excessive_nesting, clippy::too_many_lines)]
     pub async fn observe(&self, input: ObservationInput) -> Result<AcceptedObservation> {
         let mut accepted = self.material.record_observation(input.clone()).await?;
-        if matches!(input.formation, FormationDirective::None) { return Ok(accepted); }
+        if matches!(input.formation, FormationDirective::None) {
+            return Ok(accepted);
+        }
         let mut memory_revisions = Vec::new();
         let occurrence_id = accepted.occurrence.occurrence_id;
         let memory = self.require_memory()?;
@@ -58,7 +62,8 @@ impl NousRuntime {
                 ObservationMaterial::InlineText { text, .. } => Some(text.clone()),
                 ObservationMaterial::ArtifactRef { artifact_id } => {
                     let artifact = self.material.artifact(input.subject, *artifact_id).await?;
-                    self.material.objects
+                    self.material
+                        .objects
                         .get(&artifact.content_hash)
                         .await
                         .ok()
@@ -114,7 +119,14 @@ impl NousRuntime {
         }
         if let Some(session) = input.session.filter(|_| input.runtime.admit) {
             for revision in &memory_revisions {
-                self.cognition.admit(session, CognitiveRef::MemoryRevision(*revision), "formed", input.runtime.hold_until).await?;
+                self.cognition
+                    .admit(
+                        session,
+                        CognitiveRef::MemoryRevision(*revision),
+                        "formed",
+                        input.runtime.hold_until,
+                    )
+                    .await?;
             }
             self.cognition.evict_if_needed(session).await?;
         }

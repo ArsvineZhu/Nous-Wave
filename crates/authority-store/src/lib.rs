@@ -1,13 +1,13 @@
 //! PostgreSQL Authority repositories and migration ownership.
-mod references;
-mod projections;
 mod projection_input;
-mod topology_input;
+mod projections;
+mod references;
 mod serving;
-pub use serving::ServingRecord;
-pub use topology_input::{TopologyEdgeSource, TopologyProjectionInput};
+mod topology_input;
 pub use projection_input::{TextProjectionInput, TextProjectionSource};
 pub use projections::{DenseInvalidation, ProjectionInvalidation};
+pub use serving::ServingRecord;
+pub use topology_input::{TopologyEdgeSource, TopologyProjectionInput};
 
 use nous_core::{Error, Result, SubjectId};
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
@@ -19,7 +19,15 @@ pub struct AuthorityStore {
 
 impl AuthorityStore {
     pub async fn active_subjects(&self) -> Result<Vec<SubjectId>> {
-        Ok(sqlx::query_scalar::<_, uuid::Uuid>("SELECT subject_id FROM subjects WHERE status='active' ORDER BY subject_id").fetch_all(&self.pool).await.map_err(database_error)?.into_iter().map(SubjectId).collect())
+        Ok(sqlx::query_scalar::<_, uuid::Uuid>(
+            "SELECT subject_id FROM subjects WHERE status='active' ORDER BY subject_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database_error)?
+        .into_iter()
+        .map(SubjectId)
+        .collect())
     }
     pub async fn connect(url: &str, max_connections: u32) -> Result<Self> {
         if max_connections == 0 {
@@ -74,7 +82,9 @@ pub fn database_error(error: sqlx::Error) -> Error {
     match &error {
         sqlx::Error::RowNotFound => Error::NotFound("Authority record not found".into()),
         sqlx::Error::Database(e) if e.is_unique_violation() => Error::Conflict(error.to_string()),
-        sqlx::Error::Database(e) if e.is_check_violation() || e.is_foreign_key_violation() => Error::Invalid(error.to_string()),
+        sqlx::Error::Database(e) if e.is_check_violation() || e.is_foreign_key_violation() => {
+            Error::Invalid(error.to_string())
+        }
         _ => Error::Infrastructure(error.to_string()),
     }
 }

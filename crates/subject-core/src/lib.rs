@@ -43,13 +43,22 @@ impl SubjectCoreService {
         input.character_seed.validate()?;
         let subject = input.subject_id.unwrap_or_default();
         let guard = self.objects.reference_guard(false).await?;
-        let hash = self.objects.put(input.character_seed.text.as_bytes().to_vec()).await?;
+        let hash = self
+            .objects
+            .put(input.character_seed.text.as_bytes().to_vec())
+            .await?;
         let mut tx = self.store.begin().await?;
         sqlx::query("INSERT INTO subjects(subject_id,created_at,metadata) VALUES($1,$2,$3)")
-            .bind(subject.0).bind(Utc::now()).bind(input.config)
-            .execute(&mut *tx).await.map_err(nous_authority_store::database_error)?;
+            .bind(subject.0)
+            .bind(Utc::now())
+            .bind(input.config)
+            .execute(&mut *tx)
+            .await
+            .map_err(nous_authority_store::database_error)?;
         seed::insert_seed(&mut tx, subject, input.character_seed, hash, 1).await?;
-        tx.commit().await.map_err(nous_authority_store::database_error)?;
+        tx.commit()
+            .await
+            .map_err(nous_authority_store::database_error)?;
         drop(guard);
         self.subject(subject).await
     }
@@ -61,10 +70,18 @@ impl SubjectCoreService {
             .ok_or_else(|| Error::NotFound("subject not found".into()))?;
         Ok(SubjectView {
             subject_id: subject,
-            created_at: row.try_get("created_at").map_err(nous_authority_store::database_error)?,
-            state_revision: row.try_get("state_revision").map_err(nous_authority_store::database_error)?,
-            status: row.try_get("status").map_err(nous_authority_store::database_error)?,
-            config: row.try_get("metadata").map_err(nous_authority_store::database_error)?,
+            created_at: row
+                .try_get("created_at")
+                .map_err(nous_authority_store::database_error)?,
+            state_revision: row
+                .try_get("state_revision")
+                .map_err(nous_authority_store::database_error)?,
+            status: row
+                .try_get("status")
+                .map_err(nous_authority_store::database_error)?,
+            config: row
+                .try_get("metadata")
+                .map_err(nous_authority_store::database_error)?,
         })
     }
 }

@@ -1,11 +1,22 @@
-use nous_authority_store::ProjectionInvalidation;
 use super::support::*;
 use super::*;
+use nous_authority_store::ProjectionInvalidation;
 
 impl MemoryService {
-    pub async fn revision(&self, subject: SubjectId, revision: MemoryRevisionId) -> Result<MemoryView> {
-        let memory: Uuid=sqlx::query_scalar("SELECT memory_id FROM memory_revisions WHERE subject_id=$1 AND memory_revision_id=$2").bind(subject.0).bind(revision.0).fetch_one(self.store.pool()).await.map_err(db)?;
-        self.memory(subject,MemoryId(memory),Some(revision)).await
+    pub async fn revision(
+        &self,
+        subject: SubjectId,
+        revision: MemoryRevisionId,
+    ) -> Result<MemoryView> {
+        let memory: Uuid = sqlx::query_scalar(
+            "SELECT memory_id FROM memory_revisions WHERE subject_id=$1 AND memory_revision_id=$2",
+        )
+        .bind(subject.0)
+        .bind(revision.0)
+        .fetch_one(self.store.pool())
+        .await
+        .map_err(db)?;
+        self.memory(subject, MemoryId(memory), Some(revision)).await
     }
     pub async fn form_memory(&self, input: ExplicitMemoryInput) -> Result<MemoryView> {
         input.validate()?;
@@ -99,7 +110,15 @@ impl MemoryService {
         }
         tx.commit().await.map_err(db)?;
         let view = self.memory(input.subject, memory_id, None).await?;
-        self.store.invalidate(input.subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
+        self.store
+            .invalidate(
+                input.subject,
+                ProjectionInvalidation {
+                    topology: true,
+                    ..ProjectionInvalidation::text()
+                },
+            )
+            .await?;
         Ok(view)
     }
 
@@ -172,7 +191,15 @@ impl MemoryService {
                 .map_err(db)?;
         }
         if !proposal.tag_proposals.is_empty() {
-            self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
+            self.store
+                .invalidate(
+                    subject,
+                    ProjectionInvalidation {
+                        topology: true,
+                        ..ProjectionInvalidation::text()
+                    },
+                )
+                .await?;
         }
         Ok(memory)
     }
@@ -317,7 +344,15 @@ impl MemoryService {
         }
         tx.commit().await.map_err(db)?;
         let view = self.memory(input.subject, input.memory_id, None).await?;
-        self.store.invalidate(input.subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
+        self.store
+            .invalidate(
+                input.subject,
+                ProjectionInvalidation {
+                    topology: true,
+                    ..ProjectionInvalidation::text()
+                },
+            )
+            .await?;
         Ok(view)
     }
 
@@ -340,7 +375,15 @@ impl MemoryService {
             .await
             .map_err(db)?;
         let view = self.memory(subject, memory, None).await?;
-        self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
+        self.store
+            .invalidate(
+                subject,
+                ProjectionInvalidation {
+                    topology: true,
+                    ..ProjectionInvalidation::text()
+                },
+            )
+            .await?;
         Ok(view)
     }
 
@@ -357,10 +400,20 @@ impl MemoryService {
             return Err(Error::NotFound("memory not found".into()));
         }
         let view = self.memory(subject, memory, None).await?;
-        self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
+        self.store
+            .invalidate(
+                subject,
+                ProjectionInvalidation {
+                    topology: true,
+                    ..ProjectionInvalidation::text()
+                },
+            )
+            .await?;
         Ok(view)
     }
 
+    // Purge coordinates provenance reachability, Authority deletion and CAS cleanup.
+    #[allow(clippy::too_many_lines)]
     pub async fn purge_memory(&self, subject: SubjectId, memory: MemoryId) -> Result<()> {
         let guard = self.objects.reference_guard(true).await?;
         let mut tx = self.store.begin().await?;
@@ -502,7 +555,15 @@ impl MemoryService {
             }
         }
         drop(guard);
-        self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
+        self.store
+            .invalidate(
+                subject,
+                ProjectionInvalidation {
+                    topology: true,
+                    ..ProjectionInvalidation::text()
+                },
+            )
+            .await?;
         Ok(())
     }
 

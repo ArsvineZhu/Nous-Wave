@@ -30,9 +30,9 @@ Session
 
 ### Current state
 - Session/ResidentSet: PRESERVED
-- `ContextContribution` type: PARTIAL
-- ConsumerWorkingSet: MISSING
-- progressive materialization into context: PARTIAL
+- `ContextContribution` type: PRESERVED
+- ConsumerWorkingSet: PRESERVED
+- progressive materialization into context: PRESERVED
 
 ### Required this wave
 **YES**
@@ -66,7 +66,7 @@ Memory should not equal transcript storage; exact/entity/lexical/semantic signal
 - evidence-family trace.
 
 ### Current state
-**PRESERVED with query defects**
+**PRESERVED and corrected**
 
 ### Required this wave
 **YES — correction, not redesign**
@@ -121,9 +121,9 @@ optional durable formation / interpretation / consolidation
 ```
 
 ### Current state
-**PARTIAL / behavior currently inverted**
+**PRESERVED and corrected**
 
-Current `observe()` performs durable formation/projection work before Session admission.
+Observation commits source state and admits runtime references before optional formation and projection invalidation.
 
 ### Required this wave
 **YES — P0**
@@ -153,9 +153,9 @@ New experience can change current interpretation/topology of prior cognition wit
 - explicit reinterpretation/consolidation.
 
 ### Current state
-**PARTIAL**
+**BOUNDED IMPLEMENTED**
 
-Explicit structures exist, but continual evolution is mostly manual.
+Explicit provider proposals are validated and committed through Memory-owned formation/consolidation operations.
 
 ### Required this wave
 **BOUNDED YES**
@@ -180,7 +180,7 @@ Corpus-wide/global questions cannot always be answered by local top-k chunks.
 Optional Resource synopsis / integrative derived representations with provenance.
 
 ### Current state
-**MISSING/PARTIAL seam only**
+**MINIMAL CAPABILITY SEAM IMPLEMENTED**
 
 ### Required this wave
 **MINIMAL CAPABILITY SEAM, not full GraphRAG**
@@ -225,9 +225,9 @@ Vector and graph/topology views are complementary and can be independently maint
 Authority + exact/lexical/dense/topology serving generations.
 
 ### Current state
-**PARTIAL / key incremental property missing**
+**INDEPENDENT PERSISTED GENERATIONS IMPLEMENTED**
 
-Current universal `rebuild_projection(subject)` performs a broad full rebuild.
+Each serving family has independent durable generations and projection watermarks.
 
 ### Required this wave
 **YES — P0**
@@ -268,10 +268,10 @@ Memory/cognition must retain representation identity, provenance, lifecycle and 
 - coverage/readiness.
 
 ### Current state
-**PRESERVED, with serving-persistence defect**
+**PRESERVED with durable serving lifecycle**
 
 ### Required this wave
-Fix real immutable ServingGeneration persistence and materialization.
+Serving generations are staged, checksummed, persisted, reopened and atomically selected.
 
 ---
 
@@ -291,7 +291,7 @@ Fix real immutable ServingGeneration persistence and materialization.
 - CandidateSemanticTrail/observability.
 
 ### Current state
-**substantial implementation, several correctness defects**
+**PRESERVED with current-wave correctness fixes**
 
 ### Required this wave
 **YES**
@@ -315,13 +315,13 @@ No public protocol fields named after implementation algorithms.
 
 | Transfer | This wave |
 |---|---|
-| Letta ConsumerWorkingSet/ContextContribution | REQUIRED |
-| Mem0 hybrid evidence correctness | REQUIRED |
+| Letta ConsumerWorkingSet/ContextContribution | IMPLEMENTED |
+| Mem0 hybrid evidence correctness | IMPLEMENTED |
 | Graphiti temporal/provenance | PRESERVE + TEST |
-| LangMem immediate runtime vs later formation | REQUIRED P0 |
-| A-MEM bounded consolidation evolution | REQUIRED |
-| GraphRAG global synopsis seam | REQUIRED MINIMAL |
+| LangMem immediate runtime vs later formation | IMPLEMENTED |
+| A-MEM bounded consolidation evolution | IMPLEMENTED |
+| GraphRAG global synopsis seam | IMPLEMENTED MINIMAL |
 | HippoRAG associative topology class | PRESERVE |
-| LightRAG independent incremental projections | REQUIRED P0 |
-| MemOS lifecycle/provenance | PRESERVE + serving fix |
-| VCP algorithm family | REQUIRED + correctness fixes |
+| LightRAG independent incremental projections | IMPLEMENTED |
+| MemOS lifecycle/provenance | IMPLEMENTED |
+| VCP algorithm family | IMPLEMENTED + correctness fixes |

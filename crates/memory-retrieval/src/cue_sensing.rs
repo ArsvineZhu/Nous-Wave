@@ -1,5 +1,6 @@
 use crate::*;
 use nalgebra::DMatrix;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpaBasis {
@@ -16,6 +17,8 @@ pub struct EpaBasisGeneration {
     pub generation_id: ServingGenerationId,
     pub basis: EpaBasis,
 }
+
+type RepresentativeSet = (Vec<(u64, Vec<f64>)>, Vec<f64>);
 
 pub fn build_epa_basis(vectors: &[(u64, Vec<f64>)], embedding_space: &str) -> Option<EpaBasis> {
     if vectors.len() < 8 || vectors.iter().any(|(_, vector)| vector.is_empty()) {
@@ -40,22 +43,21 @@ pub fn build_epa_basis(vectors: &[(u64, Vec<f64>)], embedding_space: &str) -> Op
     if vectors.len() < 8 {
         return None;
     }
-    let vectors = if vectors.len() > 256 {
-        let last = vectors.len() - 1;
-        (0..256)
-            .map(|slot| vectors[(slot * last) / 255].clone())
-            .collect::<Vec<_>>()
+    let (vectors, weights) = if vectors.len() > 256 {
+        representative_vectors(&vectors, embedding_space, dimension)
     } else {
-        vectors
+        let weights = vec![1.0; vectors.len()];
+        (vectors, weights)
     };
     let mut mean = vec![0.0; dimension];
-    for (_, vector) in &vectors {
+    let total_weight = weights.iter().sum::<f64>().max(f64::EPSILON);
+    for ((_, vector), weight) in vectors.iter().zip(&weights) {
         for (target, value) in mean.iter_mut().zip(vector.iter()) {
-            *target += *value;
+            *target += *weight * *value;
         }
     }
     for value in &mut mean {
-        *value /= vectors.len() as f64;
+        *value /= total_weight;
     }
     let data = vectors
         .iter()
@@ -97,6 +99,105 @@ pub fn build_epa_basis(vectors: &[(u64, Vec<f64>)], embedding_space: &str) -> Op
             embedding_space: embedding_space.to_owned(),
         })
     }
+}
+
+fn representative_vectors(
+    vectors: &[(u64, Vec<f64>)],
+    embedding_space: &str,
+    dimension: usize,
+) -> RepresentativeSet {
+    let directions = [
+        projection_direction(embedding_space, 0, dimension),
+        projection_direction(embedding_space, 1, dimension),
+    ];
+    let mut buckets = BTreeMap::<(u8, u8), Vec<(usize, f64)>>::new();
+    for (index, (_, vector)) in vectors.iter().enumerate() {
+        let scores = directions
+            .iter()
+            .map(|direction| {
+                vector
+                    .iter()
+                    .zip(direction)
+                    .map(|(value, component)| value * component)
+                    .sum::<f64>()
+            })
+            .collect::<Vec<_>>();
+        let bucket = (bucket_score(scores[0]), bucket_score(scores[1]));
+        let residual = vector.iter().map(|value| value * value).sum::<f64>();
+        buckets.entry(bucket).or_default().push((index, residual));
+    }
+
+    let mut selected = HashSet::new();
+    for members in buckets.values_mut() {
+        members.sort_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then_with(|| vectors[left.0].0.cmp(&vectors[right.0].0))
+        });
+        if let Some((index, _)) = members.first() {
+            selected.insert(*index);
+        }
+        if let Some((index, _)) = members.last() {
+            selected.insert(*index);
+        }
+    }
+
+    let mut remaining = vectors
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !selected.contains(index))
+        .map(|(index, (key, vector))| {
+            let residual = vector.iter().map(|value| value * value).sum::<f64>();
+            (index, *key, residual)
+        })
+        .collect::<Vec<_>>();
+    remaining.sort_by(|left, right| {
+        right
+            .2
+            .total_cmp(&left.2)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    for (index, _, _) in remaining {
+        if selected.len() >= 256 {
+            break;
+        }
+        selected.insert(index);
+    }
+
+    let mut indices = selected.into_iter().collect::<Vec<_>>();
+    indices.sort_by_key(|index| vectors[*index].0);
+    let representatives = indices
+        .into_iter()
+        .map(|index| vectors[index].clone())
+        .collect::<Vec<_>>();
+    let weights = representatives.iter().map(|_| 1.0).collect::<Vec<_>>();
+    (representatives, weights)
+}
+
+fn projection_direction(space: &str, axis: usize, dimension: usize) -> Vec<f64> {
+    let mut direction = (0..dimension)
+        .map(|component| {
+            let digest = blake3::hash(
+                format!("nous-epa-projection-v1\0{space}\0{axis}\0{component}").as_bytes(),
+            );
+            f64::from(digest.as_bytes()[0]) / 127.5 - 1.0
+        })
+        .collect::<Vec<_>>();
+    let norm = direction
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    if norm > f64::EPSILON {
+        for value in &mut direction {
+            *value /= norm;
+        }
+    }
+    direction
+}
+
+fn bucket_score(score: f64) -> u8 {
+    (((score.clamp(-1.0, 1.0) + 1.0) * 4.0).floor() as u8).min(7)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

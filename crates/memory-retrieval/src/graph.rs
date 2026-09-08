@@ -105,6 +105,29 @@ struct EdgeMeta {
     raw: f64,
 }
 
+type WeightedEdgeRow = (u32, f64, f64, bool);
+type SourceRows = HashMap<u32, Vec<WeightedEdgeRow>>;
+
+fn edge_conductance(
+    weight: f64,
+    bridge: bool,
+    main_mass: f64,
+    main_total: f64,
+    bridge_total: f64,
+    config: WaveConfig,
+) -> f64 {
+    if bridge {
+        let budget = if main_total > 0.0 {
+            config.bridge_reserve
+        } else {
+            config.outbound_budget
+        };
+        budget * weight / bridge_total.max(f64::EPSILON)
+    } else {
+        main_mass * weight / main_total.max(f64::EPSILON)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WaveGraphGeneration {
     pub generation_id: ServingGenerationId,
@@ -121,31 +144,71 @@ impl WaveGraphGeneration {
         for from in 0..self.nodes.len() as u32 {
             for (to, weight, _) in self.outgoing(from) {
                 let meta = self.edge_meta.get(&(from, to));
-                edges.push((from, to, weight, meta.is_some_and(|meta| meta.bridge), meta.map_or(0.0, |meta| meta.raw)));
+                edges.push((
+                    from,
+                    to,
+                    weight,
+                    meta.is_some_and(|meta| meta.bridge),
+                    meta.map_or(0.0, |meta| meta.raw),
+                ));
             }
         }
-        TopologyArtifact { generation_id: self.generation_id, nodes: self.nodes.clone(), edges, config: self.config }
+        TopologyArtifact {
+            generation_id: self.generation_id,
+            nodes: self.nodes.clone(),
+            edges,
+            config: self.config,
+        }
     }
 
     pub fn from_artifact(artifact: TopologyArtifact) -> Result<Self> {
         artifact.config.validate()?;
         for (index, node) in artifact.nodes.iter().enumerate() {
-            if node.serving_id as usize != index { return Err(Error::Infrastructure("topology node ordinals are corrupt".into())); }
+            if node.serving_id as usize != index {
+                return Err(Error::Infrastructure(
+                    "topology node ordinals are corrupt".into(),
+                ));
+            }
         }
         let mut csr = Csr::with_nodes(artifact.nodes.len());
         let mut edge_meta = HashMap::new();
         for (from, to, weight, bridge, raw) in artifact.edges {
-            if from as usize >= artifact.nodes.len() || to as usize >= artifact.nodes.len() || !weight.is_finite() || weight < 0.0 || !raw.is_finite() {
-                return Err(Error::Infrastructure("topology edge artifact is corrupt".into()));
+            if from as usize >= artifact.nodes.len()
+                || to as usize >= artifact.nodes.len()
+                || !weight.is_finite()
+                || weight < 0.0
+                || !raw.is_finite()
+            {
+                return Err(Error::Infrastructure(
+                    "topology edge artifact is corrupt".into(),
+                ));
             }
-            if edge_meta.insert((from, to), EdgeMeta { bridge, raw }).is_some() {
-                return Err(Error::Infrastructure("duplicate persisted topology edge".into()));
+            if edge_meta
+                .insert((from, to), EdgeMeta { bridge, raw })
+                .is_some()
+            {
+                return Err(Error::Infrastructure(
+                    "duplicate persisted topology edge".into(),
+                ));
             }
             csr.add_edge(from, to, weight);
         }
-        let node_by_ref = artifact.nodes.iter().map(|node| (node.reference.clone(), node.serving_id)).collect();
-        Ok(Self { generation_id: artifact.generation_id, nodes: artifact.nodes, node_by_ref, csr, edge_meta, config: artifact.config })
+        let node_by_ref = artifact
+            .nodes
+            .iter()
+            .map(|node| (node.reference.clone(), node.serving_id))
+            .collect();
+        Ok(Self {
+            generation_id: artifact.generation_id,
+            nodes: artifact.nodes,
+            node_by_ref,
+            csr,
+            edge_meta,
+            config: artifact.config,
+        })
     }
+    // Normalization and CSR publication are one invariant-preserving construction step.
+    #[allow(clippy::too_many_lines)]
     pub fn build(
         mut nodes: Vec<WaveNode>,
         evidence: &[WaveEdgeEvidence],
@@ -221,7 +284,7 @@ impl WaveGraphGeneration {
         }
         adjusted.sort_by_key(|(from, to, ..)| (*from, *to));
 
-        let mut by_source: HashMap<u32, Vec<(u32, f64, f64, bool)>> = HashMap::new();
+        let mut by_source: SourceRows = HashMap::new();
         for (from, to, weight, raw, bridge) in adjusted {
             by_source
                 .entry(from)
@@ -250,18 +313,8 @@ impl WaveGraphGeneration {
                 .map(|(_, weight, _, _)| *weight)
                 .sum();
             for (to, weight, raw, bridge) in row {
-                let conductance = if bridge {
-                    if bridge_total > 0.0 {
-                        let budget = if main_total > 0.0 { config.bridge_reserve } else { config.outbound_budget };
-                        budget * weight / bridge_total
-                    } else {
-                        0.0
-                    }
-                } else if main_total > 0.0 {
-                    main_mass * weight / main_total
-                } else {
-                    0.0
-                };
+                let conductance =
+                    edge_conductance(weight, bridge, main_mass, main_total, bridge_total, config);
                 if conductance > 0.0 {
                     csr.add_edge(from, to, conductance);
                     edge_meta.insert((from, to), EdgeMeta { bridge, raw });

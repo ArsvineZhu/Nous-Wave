@@ -1,9 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use nous_core::OccurrenceId;
-use nous_core::{
-    EntityRef, Result, SourceClass, SubjectId,
-};
+use nous_core::{EntityRef, Result, SourceClass, SubjectId};
 use nous_memory_domain::MemoryFormationProposal;
 use serde::{Deserialize, Serialize};
 

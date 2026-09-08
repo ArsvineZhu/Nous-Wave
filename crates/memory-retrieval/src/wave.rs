@@ -54,6 +54,20 @@ struct PropagationState {
     hop: usize,
 }
 
+fn merge_propagation_state(existing: &mut PropagationState, next: PropagationState) {
+    existing.energy += next.energy;
+    let stronger = next.strongest_energy > existing.strongest_energy;
+    let tied_and_earlier =
+        next.strongest_energy == existing.strongest_energy && next.origin < existing.origin;
+    if stronger || tied_and_earlier {
+        existing.origin = next.origin;
+        existing.path_budget = next.path_budget;
+        existing.strongest_energy = next.strongest_energy;
+    }
+}
+
+// The bounded propagation loop intentionally keeps state, flow and truncation together.
+#[allow(clippy::too_many_lines)]
 pub fn propagate(graph: &WaveGraphGeneration, seeds: &[SourceSeed]) -> QueryRiver {
     let config = graph.config;
     let sum: f64 = seeds
@@ -74,6 +88,7 @@ pub fn propagate(graph: &WaveGraphGeneration, seeds: &[SourceSeed]) -> QueryRive
                 previous: None,
                 current: seed.node,
                 energy,
+                strongest_energy: energy,
                 path_budget: config.initial_path_budget,
                 origin: seed.origin_cue.clone(),
                 hop: 0,
@@ -163,17 +178,12 @@ pub fn propagate(graph: &WaveGraphGeneration, seeds: &[SourceSeed]) -> QueryRive
                     hop: hop + 1,
                 };
                 let key = (next_state.previous, next_state.current);
-                origins.entry(target).or_default().insert(state.origin.clone());
+                origins
+                    .entry(target)
+                    .or_default()
+                    .insert(state.origin.clone());
                 next.entry(key)
-                    .and_modify(|existing| {
-                        existing.energy += next_state.energy;
-                        if next_state.strongest_energy > existing.strongest_energy
-                            || (next_state.strongest_energy == existing.strongest_energy && next_state.origin < existing.origin) {
-                            existing.origin = next_state.origin.clone();
-                            existing.path_budget = next_state.path_budget;
-                            existing.strongest_energy = next_state.strongest_energy;
-                        }
-                    })
+                    .and_modify(|existing| merge_propagation_state(existing, next_state.clone()))
                     .or_insert(next_state);
             }
         }

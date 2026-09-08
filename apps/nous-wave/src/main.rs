@@ -1,9 +1,9 @@
 use axum::{Json, Router, extract::State, routing::get};
 use clap::{Parser, Subcommand};
+use nous_cognitive_runtime::UseFeedback;
 use nous_core::{DerivationId, Error, MemoryId, Result, SubjectId};
 use nous_memory_domain::ExplicitMemoryInput;
-use nous_subject_core::{CreateSubject, CharacterSeedInput};
-use nous_cognitive_runtime::UseFeedback;
+use nous_subject_core::{CharacterSeedInput, CreateSubject};
 use nous_wave::{NousRuntime, RuntimeOptions, RuntimeStatus};
 use postgresql_embedded::{PostgreSQL, SettingsBuilder, VersionReq};
 use serde::de::DeserializeOwned;
@@ -169,10 +169,6 @@ struct Config {
     object_store: ObjectStoreConfig,
     #[serde(default)]
     retrieval: RetrievalConfig,
-    #[serde(default)]
-    providers: std::collections::BTreeMap<String, toml::Value>,
-    #[serde(default)]
-    capabilities: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -251,10 +247,22 @@ struct RetrievalConfig {
     #[serde(default = "default_true")]
     topology_enabled: bool,
 }
-fn default_serving_root() -> String { "./data/serving".into() }
-fn default_true() -> bool { true }
+fn default_serving_root() -> String {
+    "./data/serving".into()
+}
+fn default_true() -> bool {
+    true
+}
 impl Default for RetrievalConfig {
-    fn default() -> Self { Self { resident_limit: 256, root: default_serving_root(), lexical_enabled:true, dense_enabled:true, topology_enabled:true } }
+    fn default() -> Self {
+        Self {
+            resident_limit: 256,
+            root: default_serving_root(),
+            lexical_enabled: true,
+            dense_enabled: true,
+            topology_enabled: true,
+        }
+    }
 }
 
 fn default_resident_limit() -> usize {
@@ -307,7 +315,13 @@ async fn run() -> Result<()> {
         max_upload_bytes: config.object_store.max_upload_bytes,
         resident_limit: config.retrieval.resident_limit,
         memory_enabled: config.memory_enabled,
-        serving_options: nous_serving::ServingOptions { root: resolve_path(&app_root, &config.retrieval.root), lexical: config.retrieval.lexical_enabled, dense: config.retrieval.dense_enabled, topology: config.retrieval.topology_enabled, memory_enabled: config.memory_enabled },
+        serving_options: nous_serving::ServingOptions {
+            root: resolve_path(&app_root, &config.retrieval.root),
+            lexical: config.retrieval.lexical_enabled,
+            dense: config.retrieval.dense_enabled,
+            topology: config.retrieval.topology_enabled,
+            memory_enabled: config.memory_enabled,
+        },
         embedding: None,
     })
     .await;
@@ -324,6 +338,8 @@ async fn run() -> Result<()> {
     result
 }
 
+// CLI dispatch is the stable host boundary for the modular runtime composition.
+#[allow(clippy::too_many_lines)]
 async fn dispatch(command: Command, runtime: NousRuntime, bind: SocketAddr) -> Result<()> {
     match command {
         Command::Serve => {
@@ -353,11 +369,18 @@ async fn dispatch(command: Command, runtime: NousRuntime, bind: SocketAddr) -> R
                     None => serde_json::json!({}),
                 };
                 print_json(
-                    runtime.subjects
+                    runtime
+                        .subjects
                         .create_subject(CreateSubject {
                             subject_id: None,
                             config: metadata,
-                            character_seed: CharacterSeedInput { text: tokio::fs::read_to_string(&seed).await.map_err(|error| Error::Invalid(error.to_string()))?, media_type: "text/plain; charset=utf-8".into(), provenance: serde_json::json!({"source_path": seed}) },
+                            character_seed: CharacterSeedInput {
+                                text: tokio::fs::read_to_string(&seed)
+                                    .await
+                                    .map_err(|error| Error::Invalid(error.to_string()))?,
+                                media_type: "text/plain; charset=utf-8".into(),
+                                provenance: serde_json::json!({"source_path": seed}),
+                            },
                         })
                         .await?,
                 )
@@ -368,17 +391,20 @@ async fn dispatch(command: Command, runtime: NousRuntime, bind: SocketAddr) -> R
         },
         Command::Session { command } => match command {
             SessionCommand::Open { subject } => print_json(
-                runtime.cognition
+                runtime
+                    .cognition
                     .open_session(SubjectId(subject), serde_json::json!({}))
                     .await?,
             ),
             SessionCommand::Show { subject, session } => print_json(
-                runtime.cognition
+                runtime
+                    .cognition
                     .session(SubjectId(subject), nous_core::SessionId(session))
                     .await?,
             ),
             SessionCommand::Close { subject, session } => print_json(
-                runtime.cognition
+                runtime
+                    .cognition
                     .close_session(SubjectId(subject), nous_core::SessionId(session))
                     .await?,
             ),
@@ -408,13 +434,14 @@ async fn dispatch(command: Command, runtime: NousRuntime, bind: SocketAddr) -> R
             print_json(runtime.serving.refresh(SubjectId(subject)).await?)
         }
         Command::Derivation { command } => match command {
-            DerivationCommand::RunPending { limit, owner } => print_json(
-                runtime.material
-                    .claim_derivations(limit, &owner, std::time::Duration::from_secs(60))
-                    .await?,
-            ),
+            DerivationCommand::RunPending { .. } => Err(Error::Unavailable(
+                "document derivation provider is not configured for the CLI runtime".into(),
+            )),
             DerivationCommand::Retry { derivation } => {
-                runtime.material.retry_derivation(DerivationId(derivation)).await?;
+                runtime
+                    .material
+                    .retry_derivation(DerivationId(derivation))
+                    .await?;
                 print_json(serde_json::json!({"status":"queued"}))
             }
         },
@@ -425,27 +452,32 @@ async fn dispatch(command: Command, runtime: NousRuntime, bind: SocketAddr) -> R
                 print_json(runtime.require_memory()?.form_memory(input).await?)
             }
             MemoryCommand::Show { subject, memory } => print_json(
-                runtime.require_memory()?
+                runtime
+                    .require_memory()?
                     .memory(SubjectId(subject), MemoryId(memory), None)
                     .await?,
             ),
             MemoryCommand::History { subject, memory } => print_json(
-                runtime.require_memory()?
+                runtime
+                    .require_memory()?
                     .memory_history(SubjectId(subject), MemoryId(memory))
                     .await?,
             ),
             MemoryCommand::Suppress { subject, memory } => print_json(
-                runtime.require_memory()?
+                runtime
+                    .require_memory()?
                     .suppress(SubjectId(subject), MemoryId(memory))
                     .await?,
             ),
             MemoryCommand::Restore { subject, memory } => print_json(
-                runtime.require_memory()?
+                runtime
+                    .require_memory()?
                     .restore(SubjectId(subject), MemoryId(memory))
                     .await?,
             ),
             MemoryCommand::Purge { subject, memory } => {
-                runtime.require_memory()?
+                runtime
+                    .require_memory()?
                     .purge_memory(SubjectId(subject), MemoryId(memory))
                     .await?;
                 print_json(serde_json::json!({"status":"purged"}))
@@ -453,7 +485,8 @@ async fn dispatch(command: Command, runtime: NousRuntime, bind: SocketAddr) -> R
         },
         Command::Resource { command } => match command {
             ResourceCommand::Put { subject, input } => print_json(
-                runtime.cognition
+                runtime
+                    .cognition
                     .upsert_resource(SubjectId(subject), read_json(input).await?)
                     .await?,
             ),
@@ -461,7 +494,8 @@ async fn dispatch(command: Command, runtime: NousRuntime, bind: SocketAddr) -> R
                 print_json(runtime.cognition.list_resources(SubjectId(subject)).await?)
             }
             ResourceCommand::Delete { subject, resource } => {
-                runtime.cognition
+                runtime
+                    .cognition
                     .delete_resource(SubjectId(subject), nous_core::ResourceRef::new(resource)?)
                     .await?;
                 print_json(serde_json::json!({"status":"deleted"}))
@@ -540,7 +574,7 @@ async fn open_database(
                 Error::Infrastructure(format!("managed PostgreSQL start: {error}"))
             })?;
             let database = if config.name.trim().is_empty() {
-                "nous_wave_20260907"
+                "nous_wave_20260908"
             } else {
                 &config.name
             };

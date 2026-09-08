@@ -4,11 +4,11 @@ mod build;
 mod lifecycle;
 mod provider;
 
-pub use provider::*;
 use nous_authority_store::{AuthorityStore, ServingRecord};
 use nous_core::*;
 use nous_memory_retrieval::*;
 use nous_object_store::ObjectStore;
+pub use provider::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
@@ -39,8 +39,19 @@ pub struct ProjectionStatus {
 }
 
 impl ServingService {
-    pub fn new(store: AuthorityStore, objects: ObjectStore, options: ServingOptions, embedding: Option<Arc<dyn TextEmbeddingProvider>>) -> Result<Self> {
+    pub fn new(
+        store: AuthorityStore,
+        objects: ObjectStore,
+        options: ServingOptions,
+        embedding: Option<Arc<dyn TextEmbeddingProvider>>,
+    ) -> Result<Self> {
         std::fs::create_dir_all(&options.root).map_err(artifacts::io)?;
-        Ok(Self { store, objects, options, embedding, publisher: ServingPublisher::default() })
+        Ok(Self {
+            store,
+            objects,
+            options,
+            embedding,
+            publisher: ServingPublisher::default(),
+        })
     }
 }

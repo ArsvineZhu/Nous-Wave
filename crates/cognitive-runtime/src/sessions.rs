@@ -1,6 +1,6 @@
 use crate::*;
-use sqlx::Row;
 use nous_authority_store::database_error as db;
+use sqlx::Row;
 
 impl CognitiveRuntimeService {
     pub async fn open_session(
@@ -63,11 +63,8 @@ impl CognitiveRuntimeService {
             state_revision: row.try_get("state_revision").map_err(db)?,
             resident,
         })
-    }    pub async fn require_session(
-        &self,
-        subject: SubjectId,
-        session: SessionId,
-    ) -> Result<()> {
+    }
+    pub async fn require_session(&self, subject: SubjectId, session: SessionId) -> Result<()> {
         let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cognitive_sessions WHERE subject_id=$1 AND session_id=$2 AND closed_at IS NULL)")
             .bind(subject.0)
             .bind(session.0)
@@ -130,10 +127,7 @@ impl CognitiveRuntimeService {
         Ok(())
     }
 
-    pub async fn resident_reference_strings(
-        &self,
-        session: SessionId,
-    ) -> Result<HashSet<String>> {
+    pub async fn resident_reference_strings(&self, session: SessionId) -> Result<HashSet<String>> {
         Ok(sqlx::query(
             "SELECT ref_kind,ref_value FROM resident_refs WHERE session_id=$1 AND state IN ('resident','provisional')",
         )
@@ -151,5 +145,4 @@ impl CognitiveRuntimeService {
         })
         .collect())
     }
-
 }

@@ -1,7 +1,40 @@
-use nous_authority_store::database_error as db;
 use super::*;
+use nous_authority_store::database_error as db;
 
 impl MaterialService {
+    async fn finish_derivation_claim(
+        &self,
+        claim: &DerivationClaim,
+        representation: DerivedRepresentationId,
+    ) -> Result<bool> {
+        let changed = sqlx::query("UPDATE derivation_attempts SET state='succeeded',finished_at=$2 WHERE attempt_id=$1 AND state='running' AND lease_until>now()")
+            .bind(claim.attempt_id).bind(Utc::now()).execute(self.store.pool()).await.map_err(db)?;
+        if changed.rows_affected() == 1 {
+            return Ok(true);
+        }
+        self.rollback_stale_representation(claim, representation)
+            .await?;
+        Ok(false)
+    }
+
+    async fn rollback_stale_representation(
+        &self,
+        claim: &DerivationClaim,
+        representation: DerivedRepresentationId,
+    ) -> Result<()> {
+        let mut tx = self.store.begin().await?;
+        sqlx::query("UPDATE coverage_needs SET current_representation_id=NULL,state='scheduled',updated_at=$2 WHERE current_representation_id=$1")
+            .bind(representation.0).bind(Utc::now()).execute(&mut *tx).await.map_err(db)?;
+        sqlx::query("UPDATE derivations SET successful_representation_id=NULL,state='pending',updated_at=$2 WHERE derivation_id=$1 AND successful_representation_id=$3")
+            .bind(claim.derivation_id.0).bind(Utc::now()).bind(representation.0).execute(&mut *tx).await.map_err(db)?;
+        sqlx::query("DELETE FROM derived_representations WHERE derived_representation_id=$1")
+            .bind(representation.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        tx.commit().await.map_err(db)
+    }
+
     pub async fn persist_derived_representation(
         &self,
         representation: DerivedRepresentation,
@@ -69,7 +102,9 @@ impl MaterialService {
             .await
             .map_err(db)?;
         tx.commit().await.map_err(db)?;
-        self.store.invalidate(representation.subject_id, ProjectionInvalidation::text()).await?;
+        self.store
+            .invalidate(representation.subject_id, ProjectionInvalidation::text())
+            .await?;
         Ok(representation)
     }
 
@@ -362,42 +397,32 @@ impl MaterialService {
                     region.subject_id = claim.subject_id;
                     self.persist_derived_region(region).await?;
                 }
-                Ok::<(), Error>(())
+                if !self.finish_derivation_claim(&claim, representation.derived_representation_id).await? {
+                    return Err(Error::Conflict("derivation lease expired before commit".into()));
+                }
+                Ok::<DerivedRepresentationId, Error>(representation.derived_representation_id)
             }
             .await;
             match outcome {
-                Ok(()) => {
-                    sqlx::query("UPDATE derivation_attempts SET state='succeeded',finished_at=$2 WHERE attempt_id=$1")
-                        .bind(claim.attempt_id)
-                        .bind(Utc::now())
-                        .execute(self.store.pool())
-                        .await
-                        .map_err(db)?;
+                Ok(_) => {
                     result.succeeded += 1;
                 }
                 Err(error) => {
-                    sqlx::query("UPDATE derivation_attempts SET state='transient_failed',finished_at=$2,problem_code='provider_error',problem_detail=$3 WHERE attempt_id=$1")
+                    let changed = sqlx::query("UPDATE derivation_attempts SET state='transient_failed',finished_at=$2,problem_code='provider_error',problem_detail=$3 WHERE attempt_id=$1 AND state='running' AND lease_until>now()")
                         .bind(claim.attempt_id)
                         .bind(Utc::now())
                         .bind(serde_json::json!({"detail": error.to_string()}))
                         .execute(self.store.pool())
                         .await
                         .map_err(db)?;
-                    sqlx::query("UPDATE derivations SET state='failed',updated_at=$2 WHERE derivation_id=$1")
-                        .bind(claim.derivation_id.0)
-                        .bind(Utc::now())
-                        .execute(self.store.pool())
-                        .await
-                        .map_err(db)?;
-                    sqlx::query("UPDATE coverage_needs SET state='failed',updated_at=$3 WHERE subject_id=$1 AND source_region_id=$2 AND representation_kind=$4")
-                        .bind(claim.subject_id.0)
-                        .bind(claim.source_region_id.0)
-                        .bind(Utc::now())
-                        .bind(&claim.representation_kind)
-                        .execute(self.store.pool())
-                        .await
-                        .map_err(db)?;
-                    result.failed += 1;
+                    if changed.rows_affected() == 1 {
+                        sqlx::query("UPDATE derivations SET state='failed',updated_at=$2 WHERE derivation_id=$1")
+                            .bind(claim.derivation_id.0).bind(Utc::now()).execute(self.store.pool()).await.map_err(db)?;
+                        sqlx::query("UPDATE coverage_needs SET state='failed',updated_at=$3 WHERE subject_id=$1 AND source_region_id=$2 AND representation_kind=$4")
+                            .bind(claim.subject_id.0).bind(claim.source_region_id.0).bind(Utc::now()).bind(&claim.representation_kind)
+                            .execute(self.store.pool()).await.map_err(db)?;
+                        result.failed += 1;
+                    }
                 }
             }
         }

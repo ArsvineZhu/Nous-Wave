@@ -1,11 +1,15 @@
-use nous_authority_store::database_error as db;
 use super::*;
+use nous_authority_store::database_error as db;
 
 impl MaterialService {
+    // Observation admission keeps Authority, CAS and runtime ordering explicit.
+    #[allow(clippy::too_many_lines)]
     pub async fn record_observation(&self, input: ObservationInput) -> Result<AcceptedObservation> {
         self.store.require_subject(input.subject).await?;
         if let Some(session) = input.session {
-            self.cognition.require_session(input.subject, session).await?;
+            self.cognition
+                .require_session(input.subject, session)
+                .await?;
         }
         let now = Utc::now();
         let object_guard = if matches!(
@@ -127,41 +131,48 @@ impl MaterialService {
             sqlx::query("INSERT INTO coverage_needs(coverage_need_id,subject_id,source_region_id,representation_kind,capability_operation,requirement,state,updated_at) VALUES($1,$2,$3,'extracted_text','document_extraction','preferred',$4,$5) ON CONFLICT(subject_id,source_region_id,representation_kind,capability_operation) DO UPDATE SET updated_at=excluded.updated_at")
                 .bind(Uuid::now_v7()).bind(input.subject.0).bind(region.source_region_id.0).bind(if matches!(input.material, ObservationMaterial::InlineText{..}){"ready"}else{"missing"}).bind(now).execute(&mut *tx).await.map_err(db)?;
         }
-        AuthorityStore::invalidate_in(&mut tx, input.subject, ProjectionInvalidation::text()).await?;
         tx.commit().await.map_err(db)?;
         drop(object_guard);
         let memory_revisions = Vec::new();
         if let Some(session) = input.session.filter(|_| input.runtime.admit) {
-            self.cognition.admit(
-                session,
-                CognitiveRef::Occurrence(occurrence_id),
-                "observed",
-                input.runtime.hold_until,
-            )
-            .await?;
+            self.cognition
+                .admit(
+                    session,
+                    CognitiveRef::Occurrence(occurrence_id),
+                    "observed",
+                    input.runtime.hold_until,
+                )
+                .await?;
             for mention in &input.entities {
                 if let Some(entity) = &mention.entity_ref {
-                    self.cognition.admit(
-                        session,
-                        CognitiveRef::Entity(entity.clone()),
-                        "observed",
-                        input.runtime.hold_until,
-                    )
-                    .await?;
+                    self.cognition
+                        .admit(
+                            session,
+                            CognitiveRef::Entity(entity.clone()),
+                            "observed",
+                            input.runtime.hold_until,
+                        )
+                        .await?;
                 }
             }
             if let ObservationMaterial::ResourceAvailability { resource } = &input.material {
                 ResourceRef::new(resource.as_str())?;
-                self.cognition.admit(
-                    session,
-                    CognitiveRef::Resource(resource.clone()),
-                    "resource_awareness",
-                    input.runtime.hold_until,
-                )
-                .await?;
+                self.cognition
+                    .admit(
+                        session,
+                        CognitiveRef::Resource(resource.clone()),
+                        "resource_awareness",
+                        input.runtime.hold_until,
+                    )
+                    .await?;
             }
             self.cognition.evict_if_needed(session).await?;
         }
+        // Runtime continuity is admitted before projection invalidation. A serving
+        // failure cannot erase the durable observation or its resident reference.
+        self.store
+            .invalidate(input.subject, ProjectionInvalidation::text())
+            .await?;
         Ok(AcceptedObservation {
             artifact,
             occurrence,

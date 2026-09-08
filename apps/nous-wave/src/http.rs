@@ -7,13 +7,13 @@ use axum::{
     routing::{get, post, put},
 };
 use futures::{StreamExt, stream};
+use nous_cognitive_runtime::{ResourceUpsert, UseFeedback};
 use nous_core::{CognitiveQuery, Error, MemoryId, SubjectId};
 use nous_material::ObservationInput;
+use nous_material_service::{MaterializeRequest, UploadMetadata};
 use nous_memory_domain::ExplicitMemoryInput;
 use nous_memory_service::ReviseMemoryInput;
-use nous_cognitive_runtime::{ResourceUpsert, UseFeedback};
 use nous_subject_core::CreateSubject;
-use nous_material_service::{UploadMetadata, MaterializeRequest};
 use nous_wave::NousRuntime;
 use serde_json::Value;
 use uuid::Uuid;
@@ -21,7 +21,10 @@ use uuid::Uuid;
 pub fn routes() -> Router<NousRuntime> {
     Router::new()
         .route("/v1/subjects", post(create_subject))
-        .route("/v1/subjects/{subject_id}/seed", get(character_seed).put(revise_seed))
+        .route(
+            "/v1/subjects/{subject_id}/seed",
+            get(character_seed).put(revise_seed),
+        )
         .route("/v1/subjects/{subject_id}/working-set", post(working_set))
         .route("/v1/subjects/{subject_id}/sessions", post(open_session))
         .route(
@@ -102,14 +105,17 @@ type Result<T, E = Problem> = std::result::Result<T, E>;
 
 impl From<Error> for Problem {
     fn from(error: Error) -> Self {
-        let status=match &error {
-            Error::Invalid(_)=>StatusCode::BAD_REQUEST,
-            Error::NotFound(_)=>StatusCode::NOT_FOUND,
-            Error::Conflict(_)=>StatusCode::CONFLICT,
-            Error::Unavailable(_)=>StatusCode::SERVICE_UNAVAILABLE,
-            Error::Infrastructure(_)=>StatusCode::INTERNAL_SERVER_ERROR,
+        let status = match &error {
+            Error::Invalid(_) => StatusCode::BAD_REQUEST,
+            Error::NotFound(_) => StatusCode::NOT_FOUND,
+            Error::Conflict(_) => StatusCode::CONFLICT,
+            Error::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Error::Infrastructure(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        Self {error:error.to_string(),status}
+        Self {
+            error: error.to_string(),
+            status,
+        }
     }
 }
 
@@ -124,7 +130,11 @@ async fn create_subject(
     Json(input): Json<CreateSubject>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.subjects.create_subject(input).await.map_err(Problem::from)?,
+        runtime
+            .subjects
+            .create_subject(input)
+            .await
+            .map_err(Problem::from)?,
     ))
 }
 
@@ -134,7 +144,8 @@ async fn open_session(
     Json(metadata): Json<Value>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.cognition
+        runtime
+            .cognition
             .open_session(SubjectId(subject), metadata)
             .await
             .map_err(Problem::from)?,
@@ -146,7 +157,8 @@ async fn show_session(
     Path((subject, session)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.cognition
+        runtime
+            .cognition
             .session(SubjectId(subject), nous_core::SessionId(session))
             .await
             .map_err(Problem::from)?,
@@ -158,7 +170,8 @@ async fn close_session(
     Path((subject, session)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.cognition
+        runtime
+            .cognition
             .close_session(SubjectId(subject), nous_core::SessionId(session))
             .await
             .map_err(Problem::from)?,
@@ -213,7 +226,8 @@ async fn upload_artifact(
                 }
             });
             uploaded = Some(
-                runtime.material
+                runtime
+                    .material
                     .ingest_stream(SubjectId(subject), metadata.clone(), chunks)
                     .await
                     .map_err(Problem::from)?,
@@ -232,7 +246,8 @@ async fn show_artifact(
     Path((subject, artifact)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.material
+        runtime
+            .material
             .artifact(SubjectId(subject), nous_core::ArtifactId(artifact))
             .await
             .map_err(Problem::from)?,
@@ -243,7 +258,8 @@ async fn artifact_content(
     State(runtime): State<NousRuntime>,
     Path((subject, artifact)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, Problem> {
-    let (metadata, stream) = runtime.material
+    let (metadata, stream) = runtime
+        .material
         .artifact_stream(SubjectId(subject), nous_core::ArtifactId(artifact))
         .await
         .map_err(Problem::from)?;
@@ -273,7 +289,10 @@ async fn materialize(
     Path(subject): Path<Uuid>,
     Json(input): Json<MaterializeRequest>,
 ) -> Result<Json<Value>, Problem> {
-    Ok(Json(serde_json::to_value(runtime.materialize(SubjectId(subject), input).await?).map_err(|error| Problem::from(Error::Infrastructure(error.to_string())))?))
+    Ok(Json(
+        serde_json::to_value(runtime.materialize(SubjectId(subject), input).await?)
+            .map_err(|error| Problem::from(Error::Infrastructure(error.to_string())))?,
+    ))
 }
 
 async fn form_memory(
@@ -283,7 +302,11 @@ async fn form_memory(
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     input.subject = SubjectId(subject);
     Ok(Json(
-        runtime.require_memory()?.form_memory(input).await.map_err(Problem::from)?,
+        runtime
+            .require_memory()?
+            .form_memory(input)
+            .await
+            .map_err(Problem::from)?,
     ))
 }
 
@@ -294,7 +317,8 @@ async fn consolidate(
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     input.subject = nous_core::SubjectId(subject);
     Ok(Json(
-        runtime.require_memory()?
+        runtime
+            .require_memory()?
             .consolidate(SubjectId(subject), input)
             .await
             .map_err(Problem::from)?,
@@ -306,7 +330,8 @@ async fn show_memory(
     Path((subject, memory)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.require_memory()?
+        runtime
+            .require_memory()?
             .memory(SubjectId(subject), MemoryId(memory), None)
             .await
             .map_err(Problem::from)?,
@@ -318,7 +343,8 @@ async fn memory_history(
     Path((subject, memory)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.require_memory()?
+        runtime
+            .require_memory()?
             .memory_history(SubjectId(subject), MemoryId(memory))
             .await
             .map_err(Problem::from)?,
@@ -333,7 +359,11 @@ async fn revise_memory(
     input.subject = SubjectId(subject);
     input.memory_id = MemoryId(memory);
     Ok(Json(
-        runtime.require_memory()?.revise_memory(input).await.map_err(Problem::from)?,
+        runtime
+            .require_memory()?
+            .revise_memory(input)
+            .await
+            .map_err(Problem::from)?,
     ))
 }
 
@@ -342,7 +372,8 @@ async fn suppress_memory(
     Path((subject, memory)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.require_memory()?
+        runtime
+            .require_memory()?
             .suppress(SubjectId(subject), MemoryId(memory))
             .await
             .map_err(Problem::from)?,
@@ -354,7 +385,8 @@ async fn restore_memory(
     Path((subject, memory)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.require_memory()?
+        runtime
+            .require_memory()?
             .restore(SubjectId(subject), MemoryId(memory))
             .await
             .map_err(Problem::from)?,
@@ -365,7 +397,8 @@ async fn purge_memory(
     State(runtime): State<NousRuntime>,
     Path((subject, memory)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, Problem> {
-    runtime.require_memory()?
+    runtime
+        .require_memory()?
         .purge_memory(SubjectId(subject), MemoryId(memory))
         .await
         .map_err(Problem::from)?;
@@ -387,7 +420,11 @@ async fn use_feedback(
     Json(mut input): Json<UseFeedback>,
 ) -> Result<StatusCode, Problem> {
     input.subject = SubjectId(subject);
-    runtime.cognition.use_feedback(input).await.map_err(Problem::from)?;
+    runtime
+        .cognition
+        .use_feedback(input)
+        .await
+        .map_err(Problem::from)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -398,7 +435,8 @@ async fn upsert_resource(
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     input.resource_ref = nous_core::ResourceRef::new(resource_ref).map_err(Problem::from)?;
     Ok(Json(
-        runtime.cognition
+        runtime
+            .cognition
             .upsert_resource(SubjectId(subject), input)
             .await
             .map_err(Problem::from)?,
@@ -410,7 +448,8 @@ async fn list_resources(
     Path(subject): Path<Uuid>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.cognition
+        runtime
+            .cognition
             .list_resources(SubjectId(subject))
             .await
             .map_err(Problem::from)?,
@@ -422,7 +461,8 @@ async fn delete_resource(
     Path((subject, resource_ref)): Path<(Uuid, String)>,
 ) -> Result<StatusCode, Problem> {
     let reference = nous_core::ResourceRef::new(resource_ref).map_err(Problem::from)?;
-    runtime.cognition
+    runtime
+        .cognition
         .delete_resource(SubjectId(subject), reference)
         .await
         .map_err(Problem::from)?;
@@ -434,7 +474,8 @@ async fn refresh_projections(
     Path(subject): Path<Uuid>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.serving
+        runtime
+            .serving
             .refresh(SubjectId(subject))
             .await
             .map_err(Problem::from)?,
@@ -447,7 +488,8 @@ async fn create_tag(
     Json(input): Json<nous_memory_service::CreateTagRequest>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.require_memory()?
+        runtime
+            .require_memory()?
             .create_tag(SubjectId(subject), input)
             .await
             .map_err(Problem::from)?,
@@ -460,7 +502,8 @@ async fn create_anchor(
     Json(input): Json<nous_memory_service::CreateAnchorRequest>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.require_memory()?
+        runtime
+            .require_memory()?
             .create_anchor(SubjectId(subject), input)
             .await
             .map_err(Problem::from)?,
@@ -473,7 +516,8 @@ async fn create_association(
     Json(input): Json<nous_memory_service::CreateAssociationRequest>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.require_memory()?
+        runtime
+            .require_memory()?
             .create_association(SubjectId(subject), input)
             .await
             .map_err(Problem::from)?,
@@ -486,21 +530,42 @@ async fn rebind_entity(
     Json(input): Json<nous_memory_service::RebindEntityRequest>,
 ) -> Result<Json<impl serde::Serialize>, Problem> {
     Ok(Json(
-        runtime.require_memory()?
+        runtime
+            .require_memory()?
             .rebind_entity(SubjectId(subject), input)
             .await
             .map_err(Problem::from)?,
     ))
 }
 
-
-async fn character_seed(State(runtime):State<NousRuntime>,Path(subject):Path<Uuid>) -> Result<Json<impl serde::Serialize>> {
-    Ok(Json(runtime.subjects.character_seed(SubjectId(subject),None).await?))
+async fn character_seed(
+    State(runtime): State<NousRuntime>,
+    Path(subject): Path<Uuid>,
+) -> Result<Json<impl serde::Serialize>> {
+    Ok(Json(
+        runtime
+            .subjects
+            .character_seed(SubjectId(subject), None)
+            .await?,
+    ))
 }
-async fn revise_seed(State(runtime):State<NousRuntime>,Path(subject):Path<Uuid>,Json(input):Json<nous_subject_core::CharacterSeedInput>) -> Result<Json<impl serde::Serialize>> {
-    Ok(Json(runtime.subjects.revise_character_seed(SubjectId(subject),input).await?))
+async fn revise_seed(
+    State(runtime): State<NousRuntime>,
+    Path(subject): Path<Uuid>,
+    Json(input): Json<nous_subject_core::CharacterSeedInput>,
+) -> Result<Json<impl serde::Serialize>> {
+    Ok(Json(
+        runtime
+            .subjects
+            .revise_character_seed(SubjectId(subject), input)
+            .await?,
+    ))
 }
-async fn working_set(State(runtime):State<NousRuntime>,Path(subject):Path<Uuid>,Json(mut input):Json<nous_cognitive_runtime::WorkingSetRequest>) -> Result<Json<impl serde::Serialize>> {
-    input.subject=SubjectId(subject);
-    Ok(Json(runtime.cognition.working_set(input,&runtime).await?))
+async fn working_set(
+    State(runtime): State<NousRuntime>,
+    Path(subject): Path<Uuid>,
+    Json(mut input): Json<nous_cognitive_runtime::WorkingSetRequest>,
+) -> Result<Json<impl serde::Serialize>> {
+    input.subject = SubjectId(subject);
+    Ok(Json(runtime.cognition.working_set(input, &runtime).await?))
 }

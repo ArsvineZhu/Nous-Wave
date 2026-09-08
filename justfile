@@ -1,3 +1,5 @@
+set windows-shell := ["powershell", "-NoProfile", "-Command"]
+
 default:
     @just --list
 

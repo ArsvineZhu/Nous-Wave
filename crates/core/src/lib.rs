@@ -592,6 +592,8 @@ pub enum CurrentAuthorityNeed {
 pub struct ResourceIntent {
     #[serde(default)]
     pub current_authority: CurrentAuthorityNeed,
+    #[serde(default)]
+    pub synopsis_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

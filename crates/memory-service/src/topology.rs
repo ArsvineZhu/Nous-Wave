@@ -1,6 +1,6 @@
-use nous_authority_store::ProjectionInvalidation;
 use super::support::*;
 use super::*;
+use nous_authority_store::ProjectionInvalidation;
 
 impl MemoryService {
     pub async fn create_tag(&self, subject: SubjectId, input: CreateTagRequest) -> Result<Tag> {
@@ -32,7 +32,15 @@ impl MemoryService {
             .await
             .map_err(db)?;
         tx.commit().await.map_err(db)?;
-        self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
+        self.store
+            .invalidate(
+                subject,
+                ProjectionInvalidation {
+                    topology: true,
+                    ..ProjectionInvalidation::text()
+                },
+            )
+            .await?;
         Ok(Tag {
             tag_id,
             subject_id: subject,
@@ -112,7 +120,15 @@ impl MemoryService {
                 .bind(revision_id).bind(kind).bind(value).bind(support.role).execute(&mut *tx).await.map_err(db)?;
         }
         tx.commit().await.map_err(db)?;
-        self.store.invalidate(subject, ProjectionInvalidation { topology: true, ..ProjectionInvalidation::text() }).await?;
+        self.store
+            .invalidate(
+                subject,
+                ProjectionInvalidation {
+                    topology: true,
+                    ..ProjectionInvalidation::text()
+                },
+            )
+            .await?;
         Ok(Anchor {
             anchor_id,
             subject_id: subject,
@@ -232,7 +248,9 @@ impl MemoryService {
             created_at: now,
             revoked_at: None,
         };
-        self.store.invalidate(subject, ProjectionInvalidation::topology()).await?;
+        self.store
+            .invalidate(subject, ProjectionInvalidation::topology())
+            .await?;
         Ok(result)
     }
 
@@ -273,8 +291,9 @@ impl MemoryService {
             .bind(input.mention_id).fetch_one(self.store.pool()).await.map_err(db)?;
         sqlx::query("INSERT INTO entity_binding_revisions(binding_revision_id,mention_id,revision_no,entity_ref,binding_state,host_resolution_ref,reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
             .bind(Uuid::now_v7()).bind(input.mention_id).bind(next).bind(input.entity_ref.as_ref().map(EntityRef::as_str)).bind(input.binding_state).bind(input.host_resolution_ref).bind(input.reason).bind(Utc::now()).execute(self.store.pool()).await.map_err(db)?;
-        self.store.invalidate(subject, ProjectionInvalidation::identity()).await?;
+        self.store
+            .invalidate(subject, ProjectionInvalidation::identity())
+            .await?;
         Ok(())
     }
-
 }

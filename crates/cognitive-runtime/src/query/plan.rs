@@ -10,6 +10,7 @@ pub struct QueryPlan {
     pub topology_nodes: usize,
     pub resource_limit: usize,
     pub materialize_evidence: bool,
+    pub prefer_resource_synopsis: bool,
 }
 
 impl QueryPlan {
@@ -20,17 +21,35 @@ impl QueryPlan {
             CognitiveEffort::Deep => (8, true, 5, 2048, 8),
             CognitiveEffort::Maximum => (16, true, 8, 8192, 16),
         };
-        let explicit_topology = query.cues.iter().any(|cue| matches!(cue, Cue::Tag(_) | Cue::Anchor(_)))
-            || query.targets.iter().any(|target| matches!(target, QueryTarget::EntityNeighborhood { .. } | QueryTarget::AnchorNeighborhood { .. }));
+        let explicit_topology = query
+            .cues
+            .iter()
+            .any(|cue| matches!(cue, Cue::Tag(_) | Cue::Anchor(_)))
+            || query.targets.iter().any(|target| {
+                matches!(
+                    target,
+                    QueryTarget::EntityNeighborhood { .. } | QueryTarget::AnchorNeighborhood { .. }
+                )
+            });
         Self {
-            candidate_limit: query.result_need.limit.saturating_mul(breadth).clamp(16, 8192),
-            sense_cues: (sense || query.capabilities.residual_sensing == RequirementStrength::Required)
+            candidate_limit: query
+                .result_need
+                .limit
+                .saturating_mul(breadth)
+                .clamp(16, 8192),
+            sense_cues: (sense
+                || query.capabilities.residual_sensing == RequirementStrength::Required)
                 && query.capabilities.residual_sensing != RequirementStrength::Forbidden,
             expand_topology: explicit_topology || query.effort != CognitiveEffort::Light,
             topology_rounds: rounds,
             topology_nodes: nodes,
             resource_limit: resources,
-            materialize_evidence: query.result_need.need_evidence && matches!(query.effort, CognitiveEffort::Deep | CognitiveEffort::Maximum),
+            materialize_evidence: query.result_need.need_evidence
+                && matches!(
+                    query.effort,
+                    CognitiveEffort::Deep | CognitiveEffort::Maximum
+                ),
+            prefer_resource_synopsis: query.resources.synopsis_only,
         }
     }
 }

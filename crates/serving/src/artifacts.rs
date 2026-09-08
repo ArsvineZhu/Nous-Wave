@@ -22,10 +22,20 @@ fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, String>) -> Res
     for entry in std::fs::read_dir(dir).map_err(io)? {
         let entry = entry.map_err(io)?;
         let kind = entry.file_type().map_err(io)?;
-        if kind.is_symlink() { return Err(Error::Infrastructure("serving artifact contains a symbolic link".into())); }
-        if kind.is_dir() { collect(root, &entry.path(), files)?; }
-        else {
-            let name = entry.path().strip_prefix(root).map_err(|e| Error::Infrastructure(e.to_string()))?.to_string_lossy().replace('\\', "/");
+        if kind.is_symlink() {
+            return Err(Error::Infrastructure(
+                "serving artifact contains a symbolic link".into(),
+            ));
+        }
+        if kind.is_dir() {
+            collect(root, &entry.path(), files)?;
+        } else {
+            let name = entry
+                .path()
+                .strip_prefix(root)
+                .map_err(|e| Error::Infrastructure(e.to_string()))?
+                .to_string_lossy()
+                .replace('\\', "/");
             let bytes = std::fs::read(entry.path()).map_err(io)?;
             files.insert(name, blake3::hash(&bytes).to_hex().to_string());
         }
@@ -34,7 +44,13 @@ fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, String>) -> Res
 }
 
 pub fn digest(value: &impl Serialize) -> Result<String> {
-    Ok(blake3::hash(&serde_json::to_vec(value).map_err(|e| Error::Infrastructure(e.to_string()))?).to_hex().to_string())
+    Ok(
+        blake3::hash(&serde_json::to_vec(value).map_err(|e| Error::Infrastructure(e.to_string()))?)
+            .to_hex()
+            .to_string(),
+    )
 }
 
-pub fn io(error: std::io::Error) -> Error { Error::Infrastructure(error.to_string()) }
+pub fn io(error: std::io::Error) -> Error {
+    Error::Infrastructure(error.to_string())
+}

@@ -1,6 +1,6 @@
 # Nous Wave System Description
 
-This document explains the intended current system after the architecture-rebase corrective wave.
+This document explains the current system.
 
 ## 1. Process composition
 

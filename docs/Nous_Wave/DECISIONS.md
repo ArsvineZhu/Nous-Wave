@@ -56,13 +56,13 @@ Origin/source, semantic class, epistemic class and representation/media must not
 
 ### D12 — Rust runtime/core implementation — LOCKED for current product direction
 
-### D13 — PostgreSQL 18.x structured Authority — DEFAULT, FROZEN_FOR_CURRENT_WAVE
-Earlier documentation called this LOCKED. Reclassify physical store selection as DEFAULT because it is implementation architecture, not cognitive theory. It is still frozen for this execution.
+### D13 — PostgreSQL 18.x structured Authority — DEFAULT
+Earlier documentation called this LOCKED. Reclassify physical store selection as DEFAULT because it is implementation architecture, not cognitive theory.
 
-### D14 — OpenDAL-backed content-addressed object repository — DEFAULT, FROZEN_FOR_CURRENT_WAVE
+### D14 — OpenDAL-backed content-addressed object repository — DEFAULT
 
-### D15 — local serving stack: Tantivy + USearch + exact postings + petgraph CSR — DEFAULT, FROZEN_FOR_CURRENT_WAVE
-The pre-Spec research did not benchmark all alternatives due budget. This is a direct adoption, not a proven universal optimum.
+### D15 — local serving stack: Tantivy + USearch + exact postings + petgraph CSR — DEFAULT
+The previous research phase did not benchmark all alternatives due budget. This is a direct adoption, not a proven universal optimum.
 
 ### D16 — immutable revisions/current heads/provenance — LOCKED
 
@@ -96,7 +96,7 @@ This supersedes the earlier interpretation that treated Work Cycle as a top-leve
 The system requires bounded topology-based associative expansion with inspectable flow/provenance.
 
 Current implementation:
-- VCP-derived bounded competitive Wave — DEFAULT, FROZEN_FOR_CURRENT_WAVE.
+- VCP-derived bounded competitive Wave — DEFAULT.
 
 Known alternate:
 - PPR/diffusion family — OPEN alternative.
@@ -107,7 +107,7 @@ Do not build a generic algorithm marketplace.
 Free-form cues may require discovery of weak/independent semantic directions.
 
 Current implementation:
-- EPA + Residual Pyramid — DEFAULT, FROZEN_FOR_CURRENT_WAVE.
+- EPA + Residual Pyramid — DEFAULT.
 
 Do not expose EPA in public protocol.
 
@@ -147,4 +147,4 @@ A transferred idea is either:
 - explicitly superseded/rejected with rationale;
 - FUTURE/OPEN.
 
-It must not silently disappear between research, Spec and code.
+It must not silently disappear between research, design transfer and code.

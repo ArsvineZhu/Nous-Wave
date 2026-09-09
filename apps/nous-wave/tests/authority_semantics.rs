@@ -1,14 +1,14 @@
 use chrono::Utc;
 use nous_authority_store::ProjectionInvalidation;
 use nous_cognitive_runtime::{
-    ConsumerProfile, ContextBudget, MaterializationPolicy, ResourceUpsert, UseKind,
-    WorkingSetRequest,
+    ConsumerProfile, ContextBudget, MaterializationPolicy, ResourceResolver, ResourceUpsert,
+    UseKind, WorkingSetRequest,
 };
 use nous_cognitive_runtime::{UseFeedback, UseFeedbackEvent};
 use nous_core::{
     API_VERSION, CapabilityOperation, CognitiveQuery, CognitiveRef, Cue, EmbeddingSpaceSignature,
     EntityCue, EntityRef, Modality, ProducerSignature, RepresentationKind, ServingNeed,
-    SourceClass, TagCue, TextCue,
+    SourceClass, SubjectId, TagCue, TextCue,
 };
 use nous_material::{
     FormationDirective, ObservationInput, ObservationMaterial, OccurrenceDescriptor,
@@ -18,7 +18,10 @@ use nous_material_service::{
     DocumentExtractionOutput, DocumentExtractionProvider, DocumentExtractionRequest,
 };
 use nous_memory_domain::{
-    EvidenceRef, ExplicitMemoryInput, MemoryClass, MemoryRevisionEvidence, SupportRole,
+    AssociationPolarity, AssociationSupportClass, ConsolidationRequest, ConsolidationTarget,
+    EvidenceRef, ExplicitMemoryInput, MemoryClass, MemoryRelation, MemoryRevisionEvidence,
+    SupportRole, TopologyAnchorProposal, TopologyAnchorSupport, TopologyAssociationProposal,
+    TopologyConsolidationProposal, TopologyRevisionProposal, TopologyTagProposal,
 };
 use nous_serving::{
     ServingOptions, TextEmbeddingOutput, TextEmbeddingProvider, TextEmbeddingRequest,
@@ -27,6 +30,8 @@ use nous_subject_core::{CharacterSeedInput, CreateSubject};
 use nous_wave::{NousRuntime, RuntimeOptions};
 use postgresql_embedded::{PostgreSQL, SettingsBuilder, VersionReq};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tempfile::TempDir;
 
 struct TestExtractor {
@@ -105,6 +110,65 @@ impl TextEmbeddingProvider for TestEmbedder {
                 preprocessing_revision: "1".into(),
                 config_digest: "test".into(),
             },
+        })
+    }
+}
+
+#[derive(Default)]
+struct CountingResourceResolver {
+    synopsis_calls: AtomicUsize,
+    normal_calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ResourceResolver for CountingResourceResolver {
+    async fn describe(
+        &self,
+        resource: &nous_core::ResourceRef,
+    ) -> nous_core::Result<nous_cognitive_runtime::ResourceDescriptor> {
+        Ok(nous_cognitive_runtime::ResourceDescriptor {
+            subject_id: SubjectId::new(),
+            resource_ref: resource.clone(),
+            display_label: Some("mock".into()),
+            authority_class: "external".into(),
+            coverage: serde_json::json!({}),
+            query_dimensions: serde_json::json!({}),
+            modalities: serde_json::json!([]),
+            freshness_policy: serde_json::json!({}),
+            access_cost_class: "low".into(),
+            resolver_key: "mock".into(),
+            readiness: "ready".into(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    async fn query(
+        &self,
+        resource: &nous_core::ResourceRef,
+        request: nous_cognitive_runtime::ResourceQuery,
+    ) -> nous_core::Result<nous_cognitive_runtime::ResourceQueryResult> {
+        if request.synopsis_only || request.prefer_synopsis {
+            self.synopsis_calls.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.normal_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(nous_cognitive_runtime::ResourceQueryResult {
+            resource: resource.clone(),
+            current_authority: true,
+            records: vec![serde_json::json!({"ok": true})],
+            evidence: Vec::new(),
+            degraded: None,
+        })
+    }
+
+    async fn materialize(
+        &self,
+        _handle: &str,
+    ) -> nous_core::Result<nous_cognitive_runtime::ResourceMaterial> {
+        Ok(nous_cognitive_runtime::ResourceMaterial {
+            handle: "mock".into(),
+            media_type: "text/plain".into(),
+            bytes: Vec::new(),
         })
     }
 }
@@ -213,6 +277,12 @@ async fn derivation_claim_and_provider_commit_preserve_textual_surrogate() {
         result
             .results
             .iter()
+            .any(|hit| { matches!(hit.reference, nous_core::CognitiveRef::DerivedRegion(_)) })
+    );
+    assert!(
+        result
+            .results
+            .iter()
             .all(|hit| !matches!(hit.reference, nous_core::CognitiveRef::Memory(_)))
     );
     let memory_result = runtime
@@ -244,6 +314,115 @@ async fn derivation_claim_and_provider_commit_preserve_textual_surrogate() {
     postgres.stop().await.expect("stop PostgreSQL");
 }
 
+#[tokio::test]
+async fn stale_derivation_claim_cannot_publish_semantic_rows() {
+    let (postgres, url, root) = database().await;
+    let runtime = open_runtime(&url, &root, true, None).await;
+    let subject = runtime
+        .subjects
+        .create_subject(seed_input())
+        .await
+        .expect("subject")
+        .subject_id;
+    let observed = runtime
+        .observe(ObservationInput {
+            subject,
+            session: None,
+            occurrence: OccurrenceDescriptor {
+                source_class: SourceClass::File,
+                external_object_ref: None,
+                occurred_at: None,
+                observed_at: Utc::now(),
+                conversation_ref: None,
+                actor_entity_ref: None,
+                context: serde_json::json!({}),
+            },
+            material: ObservationMaterial::InlineText {
+                text: "document".into(),
+                media_type: "application/pdf".into(),
+            },
+            entities: Vec::new(),
+            formation: FormationDirective::None,
+            runtime: RuntimeDirective::default(),
+        })
+        .await
+        .expect("observation");
+    let producer = ProducerSignature {
+        signature_hash: "stale-document-producer-v1".into(),
+        provider_class: "deterministic-library".into(),
+        operation: CapabilityOperation::DocumentExtraction,
+        implementation: "test-extractor".into(),
+        model_identity: None,
+        model_revision: None,
+        preprocessing_identity: "identity".into(),
+        preprocessing_revision: "1".into(),
+        config_digest: "test".into(),
+    };
+    runtime
+        .material
+        .schedule_derivation(
+            subject,
+            observed
+                .source_region
+                .expect("source region")
+                .source_region_id,
+            RepresentationKind::ExtractedText,
+            CapabilityOperation::DocumentExtraction,
+            producer.clone(),
+            "preferred",
+        )
+        .await
+        .expect("schedule");
+    let claims = runtime
+        .material
+        .claim_derivations(1, "worker-A", Duration::from_secs(60))
+        .await
+        .expect("claim A");
+    assert_eq!(claims.len(), 1);
+    let claim = &claims[0];
+    sqlx::query("UPDATE derivation_attempts SET lease_until=now() - interval '1 second' WHERE attempt_id=$1")
+        .bind(claim.attempt_id)
+        .execute(runtime.store.pool())
+        .await
+        .expect("expire A");
+    let stale_representation = nous_material::DerivedRepresentation {
+        derived_representation_id: nous_core::DerivedRepresentationId::new(),
+        subject_id: claim.subject_id,
+        source_region_id: claim.source_region_id,
+        representation_kind: RepresentationKind::ExtractedText,
+        producer: producer.clone(),
+        revision: 1,
+        payload_text: Some("stale".into()),
+        payload_artifact_id: None,
+        quality: serde_json::json!({}),
+        created_at: Utc::now(),
+        supersedes: None,
+    };
+    let stale_error = runtime
+        .material
+        .commit_derivation_claim(claim, stale_representation, Vec::new())
+        .await
+        .expect_err("stale commit rejected");
+    assert!(matches!(stale_error, nous_core::Error::Conflict(_)));
+    let run = runtime
+        .material
+        .run_pending_derivations(1, "worker-B", Arc::new(TestExtractor { producer }))
+        .await
+        .expect("run B");
+    assert_eq!(run.succeeded, 1);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM derived_representations WHERE subject_id=$1 AND representation_kind=$2",
+    )
+    .bind(subject.0)
+    .bind("extracted_text")
+    .fetch_one(runtime.store.pool())
+    .await
+    .expect("count derived");
+    assert_eq!(count, 1);
+    runtime.store.close().await;
+    postgres.stop().await.expect("stop PostgreSQL");
+}
+
 #[async_trait::async_trait]
 impl DocumentExtractionProvider for TestExtractor {
     async fn extract(
@@ -254,7 +433,16 @@ impl DocumentExtractionProvider for TestExtractor {
             representation_kind: RepresentationKind::ExtractedText,
             text: "persisted extracted surrogate".into(),
             producer: self.producer.clone(),
-            derived_regions: Vec::new(),
+            derived_regions: vec![nous_material::DerivedRegion {
+                derived_region_id: nous_core::DerivedRegionId::new(),
+                subject_id: SubjectId::new(),
+                derived_representation_id: nous_core::DerivedRepresentationId::new(),
+                coordinate_kind: "text_span".into(),
+                coordinate: serde_json::json!({"start":0,"end":8}),
+                coordinate_hash: "test-derived-region".into(),
+                parent_derived_region_id: None,
+                created_at: Utc::now(),
+            }],
             warnings: Vec::new(),
             coverage: serde_json::json!({"complete":true}),
         })
@@ -272,6 +460,7 @@ async fn database() -> (PostgreSQL, String, TempDir) {
         .installation_dir(root.path().join("install"))
         .data_dir(root.path().join("data"))
         .password_file(root.path().join("postgres.pgpass"))
+        .timeout(Some(Duration::from_secs(30)))
         .temporary(false)
         .build();
     let mut postgres = PostgreSQL::new(settings);
@@ -286,7 +475,10 @@ async fn database() -> (PostgreSQL, String, TempDir) {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "integration scenario proves artifact identity and explicit use semantics"
+)]
 async fn same_artifact_keeps_distinct_occurrences_and_use_is_explicit() {
     let (postgres, url, root) = database().await;
     let runtime = open_runtime(&url, &root, true, None).await;
@@ -368,6 +560,7 @@ async fn same_artifact_keeps_distinct_occurrences_and_use_is_explicit() {
             }],
             entity_refs: Vec::new(),
             tags: Vec::new(),
+            tag_order_provenance: None,
             occurred_at: None,
             observed_at: Utc::now(),
             valid_from: None,
@@ -429,7 +622,10 @@ async fn same_artifact_keeps_distinct_occurrences_and_use_is_explicit() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "integration scenario proves rebuilt serving lanes and target isolation"
+)]
 async fn query_uses_rebuilt_entity_tag_and_lexical_projections() {
     let (postgres, url, root) = database().await;
     let runtime = open_runtime(&url, &root, true, Some(Arc::new(TestEmbedder))).await;
@@ -516,6 +712,7 @@ async fn query_uses_rebuilt_entity_tag_and_lexical_projections() {
             }],
             entity_refs: vec![entity.clone()],
             tags: vec![tag.tag_id],
+            tag_order_provenance: None,
             occurred_at: None,
             observed_at: Utc::now(),
             valid_from: None,
@@ -678,6 +875,7 @@ async fn field_dense_only_candidate_enters_final_results() {
             }],
             entity_refs: Vec::new(),
             tags: vec![tag.tag_id],
+            tag_order_provenance: None,
             occurred_at: None,
             observed_at: Utc::now(),
             valid_from: None,
@@ -707,6 +905,7 @@ async fn field_dense_only_candidate_enters_final_results() {
                 }],
                 entity_refs: Vec::new(),
                 tags: Vec::new(),
+                tag_order_provenance: None,
                 occurred_at: None,
                 observed_at: Utc::now(),
                 valid_from: None,
@@ -768,7 +967,12 @@ async fn field_dense_only_candidate_enters_final_results() {
     let light_work = result
         .diagnostics
         .as_ref()
-        .and_then(|diagnostics| diagnostics.candidate_counts.get("all_lanes").copied())
+        .and_then(|diagnostics| {
+            diagnostics
+                .candidate_counts
+                .get("executed_candidate_bound")
+                .copied()
+        })
         .expect("light work count");
     let maximum = runtime
         .query(CognitiveQuery {
@@ -800,9 +1004,392 @@ async fn field_dense_only_candidate_enters_final_results() {
     let maximum_work = maximum
         .diagnostics
         .as_ref()
-        .and_then(|diagnostics| diagnostics.candidate_counts.get("all_lanes").copied())
+        .and_then(|diagnostics| {
+            diagnostics
+                .candidate_counts
+                .get("executed_candidate_bound")
+                .copied()
+        })
         .expect("maximum work count");
     assert!(maximum_work > light_work);
+    runtime.store.close().await;
+    postgres.stop().await.expect("stop PostgreSQL");
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "integration scenario proves topology-only proposal validation and atomic commit"
+)]
+async fn topology_only_consolidation_proposal_is_validated_and_atomic() {
+    let (postgres, url, root) = database().await;
+    let runtime = open_runtime(&url, &root, true, None).await;
+    let subject = runtime
+        .subjects
+        .create_subject(seed_input())
+        .await
+        .expect("subject")
+        .subject_id;
+    let observed = runtime
+        .observe(ObservationInput {
+            subject,
+            session: None,
+            occurrence: OccurrenceDescriptor {
+                source_class: SourceClass::Message,
+                external_object_ref: None,
+                occurred_at: None,
+                observed_at: Utc::now(),
+                conversation_ref: None,
+                actor_entity_ref: None,
+                context: serde_json::json!({}),
+            },
+            material: ObservationMaterial::InlineText {
+                text: "consolidation source".into(),
+                media_type: "text/plain".into(),
+            },
+            entities: Vec::new(),
+            formation: FormationDirective::None,
+            runtime: RuntimeDirective::default(),
+        })
+        .await
+        .expect("observation");
+    let make_memory = |representation: &str| ExplicitMemoryInput {
+        subject,
+        memory_class: MemoryClass::Specific,
+        semantic_role: "source".into(),
+        representation_text: representation.into(),
+        title: None,
+        evidence: vec![MemoryRevisionEvidence {
+            evidence_no: 0,
+            evidence: EvidenceRef::Occurrence {
+                occurrence_id: observed.occurrence.occurrence_id,
+            },
+            support_role: SupportRole::Direct,
+            weight: Some(1.0),
+        }],
+        entity_refs: Vec::new(),
+        tags: Vec::new(),
+        tag_order_provenance: None,
+        occurred_at: None,
+        observed_at: Utc::now(),
+        valid_from: None,
+        valid_to: None,
+        epistemic_class: nous_core::EpistemicClass::Observed,
+        confidence: None,
+    };
+    let first = runtime
+        .require_memory()
+        .expect("memory")
+        .form_memory(make_memory("first source"))
+        .await
+        .expect("first source");
+    let second = runtime
+        .require_memory()
+        .expect("memory")
+        .form_memory(make_memory("second source"))
+        .await
+        .expect("second source");
+    let source_revisions = vec![
+        first.revision.memory_revision_id,
+        second.revision.memory_revision_id,
+    ];
+    let invalid = ConsolidationRequest {
+        subject,
+        source_memories: source_revisions.clone(),
+        target: ConsolidationTarget::TopologyOnly,
+        capability: nous_core::CapabilityRequirement {
+            operation: CapabilityOperation::MemoryConsolidationText,
+            strength: nous_core::RequirementStrength::Optional,
+        },
+        representation_text: None,
+        semantic_role: None,
+        topology: Some(TopologyConsolidationProposal {
+            tags: Vec::new(),
+            anchors: Vec::new(),
+            associations: vec![TopologyAssociationProposal {
+                from: CognitiveRef::Memory(nous_core::MemoryId::new()),
+                to: CognitiveRef::MemoryRevision(second.revision.memory_revision_id),
+                association_kind: "external".into(),
+                polarity: AssociationPolarity::Positive,
+                support_class: AssociationSupportClass::HostExplicit,
+                support_value: 1.0,
+                occurrence_id: None,
+                memory_revision_id: None,
+                bridge_hint: false,
+            }],
+            revisions: Vec::new(),
+        }),
+    };
+    let invalid_error = runtime
+        .require_memory()
+        .expect("memory")
+        .consolidate(subject, invalid)
+        .await
+        .expect_err("invalid cross-subject proposal");
+    assert!(matches!(invalid_error, nous_core::Error::Invalid(_)));
+    let invalid_counts: (i64, i64, i64) = (
+        sqlx::query_scalar("SELECT count(*) FROM tags WHERE subject_id=$1")
+            .bind(subject.0)
+            .fetch_one(runtime.store.pool())
+            .await
+            .expect("tag count"),
+        sqlx::query_scalar("SELECT count(*) FROM anchors WHERE subject_id=$1")
+            .bind(subject.0)
+            .fetch_one(runtime.store.pool())
+            .await
+            .expect("anchor count"),
+        sqlx::query_scalar("SELECT count(*) FROM association_evidence WHERE subject_id=$1")
+            .bind(subject.0)
+            .fetch_one(runtime.store.pool())
+            .await
+            .expect("association count"),
+    );
+    assert_eq!(invalid_counts, (0, 0, 0));
+
+    let valid = ConsolidationRequest {
+        subject,
+        source_memories: source_revisions.clone(),
+        target: ConsolidationTarget::TopologyOnly,
+        capability: nous_core::CapabilityRequirement {
+            operation: CapabilityOperation::MemoryConsolidationText,
+            strength: nous_core::RequirementStrength::Optional,
+        },
+        representation_text: None,
+        semantic_role: None,
+        topology: Some(TopologyConsolidationProposal {
+            tags: vec![TopologyTagProposal {
+                label: "topology-tag".into(),
+                description: None,
+                kind_hint: None,
+                tag_id: None,
+                attach_to: source_revisions.clone(),
+            }],
+            anchors: vec![TopologyAnchorProposal {
+                label: Some("topology-anchor".into()),
+                description: "consolidated anchor".into(),
+                supports: vec![TopologyAnchorSupport {
+                    reference: CognitiveRef::MemoryRevision(first.revision.memory_revision_id),
+                    role: "support".into(),
+                }],
+                confirmed: true,
+            }],
+            associations: vec![TopologyAssociationProposal {
+                from: CognitiveRef::MemoryRevision(first.revision.memory_revision_id),
+                to: CognitiveRef::MemoryRevision(second.revision.memory_revision_id),
+                association_kind: "experiential".into(),
+                polarity: AssociationPolarity::Positive,
+                support_class: AssociationSupportClass::HostExplicit,
+                support_value: 1.0,
+                occurrence_id: None,
+                memory_revision_id: None,
+                bridge_hint: false,
+            }],
+            revisions: vec![TopologyRevisionProposal {
+                memory_id: first.object.memory_id,
+                representation_text: "revised first source".into(),
+                semantic_role: Some("revised".into()),
+                title: None,
+                evidence: first.evidence.clone(),
+                relation: MemoryRelation::Supersedes,
+                occurred_at: None,
+                valid_from: None,
+                valid_to: None,
+                epistemic_class: nous_core::EpistemicClass::Observed,
+                confidence: None,
+            }],
+        }),
+    };
+    let result = runtime
+        .require_memory()
+        .expect("memory")
+        .consolidate(subject, valid)
+        .await
+        .expect("valid topology proposal");
+    assert!(result.memory.is_none());
+    assert_eq!(result.topology_changes, 6);
+    let tag_count: i64 = sqlx::query_scalar("SELECT count(*) FROM tags WHERE subject_id=$1")
+        .bind(subject.0)
+        .fetch_one(runtime.store.pool())
+        .await
+        .expect("tag count");
+    let anchor_count: i64 = sqlx::query_scalar("SELECT count(*) FROM anchors WHERE subject_id=$1")
+        .bind(subject.0)
+        .fetch_one(runtime.store.pool())
+        .await
+        .expect("anchor count");
+    let association_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM association_evidence WHERE subject_id=$1")
+            .bind(subject.0)
+            .fetch_one(runtime.store.pool())
+            .await
+            .expect("association count");
+    assert_eq!(tag_count, 1);
+    assert_eq!(anchor_count, 1);
+    assert_eq!(association_count, 1);
+    let original = runtime
+        .require_memory()
+        .expect("memory")
+        .memory(
+            subject,
+            first.object.memory_id,
+            Some(first.revision.memory_revision_id),
+        )
+        .await
+        .expect("original source remains readable");
+    assert!(!original.evidence.is_empty());
+    runtime.store.close().await;
+    postgres.stop().await.expect("stop PostgreSQL");
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "integration scenario proves derived cognition and CAS reachability retention"
+)]
+async fn purge_respects_reachability_for_derived_representations() {
+    let (postgres, url, root) = database().await;
+    let runtime = open_runtime(&url, &root, true, None).await;
+    let subject = runtime
+        .subjects
+        .create_subject(seed_input())
+        .await
+        .expect("subject")
+        .subject_id;
+    let observed = runtime
+        .observe(ObservationInput {
+            subject,
+            session: None,
+            occurrence: OccurrenceDescriptor {
+                source_class: SourceClass::File,
+                external_object_ref: None,
+                occurred_at: None,
+                observed_at: Utc::now(),
+                conversation_ref: None,
+                actor_entity_ref: None,
+                context: serde_json::json!({}),
+            },
+            material: ObservationMaterial::InlineText {
+                text: "shared derived source".into(),
+                media_type: "application/pdf".into(),
+            },
+            entities: Vec::new(),
+            formation: FormationDirective::None,
+            runtime: RuntimeDirective::default(),
+        })
+        .await
+        .expect("observation");
+    let producer = ProducerSignature {
+        signature_hash: "purge-derived-producer-v1".into(),
+        provider_class: "deterministic-library".into(),
+        operation: CapabilityOperation::DocumentExtraction,
+        implementation: "test-extractor".into(),
+        model_identity: None,
+        model_revision: None,
+        preprocessing_identity: "identity".into(),
+        preprocessing_revision: "1".into(),
+        config_digest: "test".into(),
+    };
+    runtime
+        .material
+        .schedule_derivation(
+            subject,
+            observed
+                .source_region
+                .expect("source region")
+                .source_region_id,
+            RepresentationKind::ExtractedText,
+            CapabilityOperation::DocumentExtraction,
+            producer.clone(),
+            "preferred",
+        )
+        .await
+        .expect("schedule");
+    runtime
+        .material
+        .run_pending_derivations(1, "purge-worker", Arc::new(TestExtractor { producer }))
+        .await
+        .expect("derive");
+    let derived_id: uuid::Uuid = sqlx::query_scalar(
+        "SELECT derived_representation_id FROM derived_representations WHERE subject_id=$1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(subject.0)
+    .fetch_one(runtime.store.pool())
+    .await
+    .expect("derived id");
+    let make_memory = |text: &str| ExplicitMemoryInput {
+        subject,
+        memory_class: MemoryClass::Specific,
+        semantic_role: "uses-derived".into(),
+        representation_text: text.into(),
+        title: None,
+        evidence: vec![MemoryRevisionEvidence {
+            evidence_no: 0,
+            evidence: EvidenceRef::DerivedRepresentation {
+                derived_representation_id: nous_core::DerivedRepresentationId(derived_id),
+            },
+            support_role: SupportRole::Direct,
+            weight: Some(1.0),
+        }],
+        entity_refs: Vec::new(),
+        tags: Vec::new(),
+        tag_order_provenance: None,
+        occurred_at: None,
+        observed_at: Utc::now(),
+        valid_from: None,
+        valid_to: None,
+        epistemic_class: nous_core::EpistemicClass::Observed,
+        confidence: None,
+    };
+    let first = runtime
+        .require_memory()
+        .expect("memory")
+        .form_memory(make_memory("first derived consumer"))
+        .await
+        .expect("first");
+    let second = runtime
+        .require_memory()
+        .expect("memory")
+        .form_memory(make_memory("second derived consumer"))
+        .await
+        .expect("second");
+    runtime
+        .require_memory()
+        .expect("memory")
+        .purge_memory(subject, first.object.memory_id)
+        .await
+        .expect("purge first");
+    let retained: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM derived_representations WHERE derived_representation_id=$1",
+    )
+    .bind(derived_id)
+    .fetch_one(runtime.store.pool())
+    .await
+    .expect("derived retained count");
+    assert_eq!(retained, 1);
+    sqlx::query("UPDATE coverage_needs SET current_representation_id=NULL,state='missing' WHERE current_representation_id=$1")
+        .bind(derived_id)
+        .execute(runtime.store.pool())
+        .await
+        .expect("clear coverage");
+    sqlx::query("UPDATE derivations SET successful_representation_id=NULL,state='pending' WHERE successful_representation_id=$1")
+        .bind(derived_id)
+        .execute(runtime.store.pool())
+        .await
+        .expect("clear derivation");
+    runtime
+        .require_memory()
+        .expect("memory")
+        .purge_memory(subject, second.object.memory_id)
+        .await
+        .expect("purge second");
+    let removable: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM derived_representations WHERE derived_representation_id=$1",
+    )
+    .bind(derived_id)
+    .fetch_one(runtime.store.pool())
+    .await
+    .expect("derived removed count");
+    assert_eq!(removable, 0);
     runtime.store.close().await;
     postgres.stop().await.expect("stop PostgreSQL");
 }
@@ -1220,6 +1807,118 @@ async fn resource_delete_is_subject_scoped() {
 }
 
 #[tokio::test]
+async fn resource_plan_reaches_resolver_and_bounds_actions() {
+    let (postgres, url, root) = database().await;
+    let mut runtime = open_runtime(&url, &root, false, None).await;
+    let subject = runtime
+        .subjects
+        .create_subject(seed_input())
+        .await
+        .expect("subject")
+        .subject_id;
+    let resolver = Arc::new(CountingResourceResolver::default());
+    runtime.cognition = runtime
+        .cognition
+        .clone()
+        .with_resource_resolver("mock", resolver.clone());
+    let first = nous_core::ResourceRef::new("resource:test:first").expect("first");
+    let second = nous_core::ResourceRef::new("resource:test:second").expect("second");
+    for resource_ref in [first.clone(), second.clone()] {
+        runtime
+            .cognition
+            .upsert_resource(
+                subject,
+                ResourceUpsert {
+                    resource_ref,
+                    display_label: Some("mock".into()),
+                    authority_class: "external".into(),
+                    coverage: serde_json::json!({}),
+                    query_dimensions: serde_json::json!({}),
+                    modalities: serde_json::json!([]),
+                    freshness_policy: serde_json::json!({}),
+                    access_cost_class: "low".into(),
+                    resolver_key: "mock".into(),
+                    readiness: "ready".into(),
+                },
+            )
+            .await
+            .expect("upsert resource");
+    }
+    let query = |synopsis_only: bool,
+                 current: bool,
+                 exploration: nous_core::ExplorationIntent,
+                 effort: nous_core::CognitiveEffort| CognitiveQuery {
+        api_version: API_VERSION,
+        subject,
+        session: None,
+        situation: Default::default(),
+        targets: vec![nous_core::QueryTarget::Resource],
+        cues: Vec::new(),
+        constraints: Default::default(),
+        exploration,
+        resources: nous_core::ResourceIntent {
+            current_authority: if current {
+                nous_core::CurrentAuthorityNeed::Prefer
+            } else {
+                nous_core::CurrentAuthorityNeed::None
+            },
+            synopsis_only,
+        },
+        result_need: Default::default(),
+        effort,
+        capabilities: Default::default(),
+        diagnostics: Default::default(),
+    };
+    let synopsis = runtime
+        .query(query(
+            true,
+            false,
+            nous_core::ExplorationIntent::None,
+            nous_core::CognitiveEffort::Light,
+        ))
+        .await
+        .expect("synopsis query");
+    assert_eq!(synopsis.resource_actions.len(), 1);
+    assert!(resolver.synopsis_calls.load(Ordering::SeqCst) > 0);
+
+    let global = runtime
+        .query(query(
+            false,
+            false,
+            nous_core::ExplorationIntent::Global,
+            nous_core::CognitiveEffort::Maximum,
+        ))
+        .await
+        .expect("global query");
+    assert_eq!(global.resource_actions.len(), 2);
+    let before_local = resolver.synopsis_calls.load(Ordering::SeqCst);
+    let local = runtime
+        .query(query(
+            false,
+            true,
+            nous_core::ExplorationIntent::None,
+            nous_core::CognitiveEffort::Light,
+        ))
+        .await
+        .expect("local query");
+    assert_eq!(local.resource_actions.len(), 1);
+    assert_eq!(resolver.synopsis_calls.load(Ordering::SeqCst), before_local);
+    assert!(resolver.normal_calls.load(Ordering::SeqCst) > 0);
+    let maximum_local = runtime
+        .query(query(
+            false,
+            true,
+            nous_core::ExplorationIntent::None,
+            nous_core::CognitiveEffort::Maximum,
+        ))
+        .await
+        .expect("maximum local query");
+    assert_eq!(maximum_local.resource_actions.len(), 2);
+    runtime.store.close().await;
+    postgres.stop().await.expect("stop PostgreSQL");
+}
+
+#[tokio::test]
 async fn projection_invalidation_commits_and_rolls_back_atomically() {
     let (postgres, url, root) = database().await;
     let runtime = open_runtime(&url, &root, false, None).await;
@@ -1396,6 +2095,7 @@ async fn open_runtime(
             memory_enabled,
         },
         embedding,
+        providers: nous_wave::RuntimeProviderConfig::default(),
     })
     .await
     .expect("open runtime")

@@ -1,17 +1,21 @@
 use super::support::*;
 use super::*;
 
+use super::query_diagnostics::{QueryDiagnosticsInput, build_query_diagnostics};
 use super::query_helpers::*;
 
 impl MemoryService {
     // Query orchestration retains lane ordering and evidence-family semantics together.
-    #[allow(clippy::excessive_nesting, clippy::too_many_lines)]
     pub async fn query(&self, query: CognitiveQuery) -> Result<CognitiveQueryResult> {
         let plan = nous_cognitive_runtime::QueryPlan::for_query(&query);
         self.query_with_plan(query, &plan).await
     }
 
-    #[allow(clippy::excessive_nesting, clippy::too_many_lines)]
+    #[expect(
+        clippy::excessive_nesting,
+        clippy::too_many_lines,
+        reason = "query orchestration owns the ordered candidate and evidence phases"
+    )]
     pub async fn query_with_plan(
         &self,
         query: CognitiveQuery,
@@ -108,9 +112,11 @@ impl MemoryService {
             .trim()
             .to_owned();
         let mut candidates = CandidateAccumulator::default();
+        let mut executed_candidate_bound = 0usize;
         if !pattern.is_empty()
             && let Some(lexical) = &snapshot.lexical
         {
+            executed_candidate_bound = executed_candidate_bound.max(plan.candidate_limit);
             match lexical.search(&pattern, plan.candidate_limit) {
                 Ok(matches) => {
                     for (rank, item) in matches.into_iter().enumerate() {
@@ -166,6 +172,9 @@ impl MemoryService {
                             return Err(Error::Unavailable(space_degradation.code.clone()));
                         }
                         degradation.push(space_degradation);
+                    } else {
+                        executed_candidate_bound =
+                            executed_candidate_bound.max(plan.candidate_limit);
                     }
                 }
                 Err(error)
@@ -214,7 +223,7 @@ impl MemoryService {
             .entity_requirements
             .iter()
             .collect::<Vec<_>>();
-        let mut tag_cues = query
+        let tag_cues = query
             .cues
             .iter()
             .filter_map(|cue| match cue {
@@ -222,6 +231,7 @@ impl MemoryService {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let mut residual_tag_cues = Vec::new();
         let mut anchor_cues = query
             .cues
             .iter()
@@ -256,52 +266,20 @@ impl MemoryService {
                             .then_some((record.serving_doc_id, record.reference.clone()))
                     })
                     .collect::<HashMap<_, _>>();
-                let residual = residual_pyramid_with_search(
-                    &output
-                        .vector
-                        .iter()
-                        .map(|value| f64::from(*value))
-                        .collect::<Vec<_>>(),
+                let residual = self.cue_sensing.sense(
+                    &output.vector,
+                    generation,
                     ResidualConfig {
                         top_k_per_level: plan.candidate_limit.clamp(1, 64),
                         ..ResidualConfig::default()
                     },
-                    |residual, limit| {
-                        let residual = residual
-                            .iter()
-                            .map(|value| *value as f32)
-                            .collect::<Vec<_>>();
-                        generation
-                            .search(&residual, limit.saturating_mul(4).max(limit))
-                            .map(|matches| {
-                                matches
-                                    .into_iter()
-                                    .filter_map(|item| item.record)
-                                    .filter_map(|record| {
-                                        if !matches!(record.reference, CognitiveRef::Tag(_)) {
-                                            return None;
-                                        }
-                                        generation.vector(record.serving_doc_id).map(|vector| {
-                                            (
-                                                record.serving_doc_id,
-                                                vector
-                                                    .iter()
-                                                    .map(|value| f64::from(*value))
-                                                    .collect(),
-                                            )
-                                        })
-                                    })
-                                    .take(limit)
-                                    .collect::<Vec<_>>()
-                            })
-                    },
                 )?;
                 if let Some(residual) = residual {
                     for sensed in residual.levels.iter().flat_map(|level| level.sensed.iter()) {
-                        if let Some(CognitiveRef::Tag(tag)) = tag_by_doc.get(&sensed.tag_key)
-                            && !tag_cues.contains(tag)
-                        {
-                            tag_cues.push(*tag);
+                        if let Some(CognitiveRef::Tag(tag)) = tag_by_doc.get(&sensed.tag_key) {
+                            if !residual_tag_cues.contains(tag) {
+                                residual_tag_cues.push(*tag);
+                            }
                             residual_seed_refs
                                 .push((CognitiveRef::Tag(*tag), sensed.seed_weight.max(0.0)));
                         }
@@ -376,6 +354,8 @@ impl MemoryService {
                             .into_iter()
                             .enumerate()
                         {
+                            executed_candidate_bound =
+                                executed_candidate_bound.max(plan.candidate_limit);
                             if let Some(record) = item.record {
                                 candidates.add_dense(record.reference, rank + 1, "denoised_dense");
                             }
@@ -438,6 +418,11 @@ impl MemoryService {
                 .map(|tag| CognitiveRef::Tag(*tag).to_string()),
         );
         posting_keys.extend(
+            residual_tag_cues
+                .iter()
+                .map(|tag| CognitiveRef::Tag(*tag).to_string()),
+        );
+        posting_keys.extend(
             anchor_cues
                 .iter()
                 .map(|anchor| CognitiveRef::Anchor(*anchor).to_string()),
@@ -467,6 +452,7 @@ impl MemoryService {
             if posting_budget == 0 {
                 break;
             }
+            executed_candidate_bound = executed_candidate_bound.max(plan.candidate_limit);
             let references = snapshot.postings.references(&key);
             let consumed = references.len().min(posting_budget);
             for reference in references.into_iter().take(posting_budget) {
@@ -510,12 +496,9 @@ impl MemoryService {
                     .map(|embedding| embedding.space.space_hash.as_str()),
             );
             if !seeds.is_empty() {
-                let river = propagate_weighted_with_budget(
-                    wave,
-                    &seeds,
-                    plan.topology_rounds,
-                    plan.topology_nodes,
-                );
+                let river =
+                    self.expansion
+                        .expand(wave, &seeds, plan.topology_rounds, plan.topology_nodes);
                 let mut topology_candidates = river
                     .provenance
                     .iter()
@@ -573,6 +556,8 @@ impl MemoryService {
                         .into_iter()
                         .enumerate()
                     {
+                        executed_candidate_bound =
+                            executed_candidate_bound.max(plan.candidate_limit);
                         if let Some(record) = item.record {
                             let reference = record.reference.clone();
                             candidates.add_dense(reference.clone(), rank + 1, variant);
@@ -915,11 +900,6 @@ impl MemoryService {
             plan.materialize_evidence,
         )
         .await?;
-        let (resource_actions, resource_degradation) = self
-            .cognition
-            .resource_actions_for_query(&query, plan)
-            .await?;
-        degradation.extend(resource_degradation);
         let status = if degradation.is_empty() {
             QueryStatus::Complete
         } else {
@@ -946,75 +926,30 @@ impl MemoryService {
             },
             status,
             results,
-            resource_actions,
+            // Resource routing is owned by Cognitive Runtime. Keeping it out
+            // of the Memory contributor prevents one host query from invoking
+            // a resolver twice.
+            resource_actions: Vec::new(),
             degradation,
-            diagnostics: (query.diagnostics != DiagnosticsRequest::None).then_some({
-                let mut candidate_counts = BTreeMap::from([
-                    ("structured".into(), rank_inputs.len()),
-                    ("lexical".into(), lexical_ranks.len()),
-                    ("dense".into(), dense_ranks.len()),
-                    ("all_lanes".into(), candidates.candidate_refs().count()),
-                    (
-                        "field_dense".into(),
-                        dense_variants
-                            .values()
-                            .filter(|variants| {
-                                variants.contains("local_field_dense")
-                                    || variants.contains("transfer_field_dense")
-                            })
-                            .count(),
-                    ),
-                ]);
-                let lane_status = BTreeMap::from([
-                    (
-                        "epa".into(),
-                        if epa_trace.is_some() {
-                            "ready"
-                        } else {
-                            "unavailable"
-                        }
-                        .into(),
-                    ),
-                    (
-                        "residual".into(),
-                        if residual_trace.is_some() {
-                            "ready"
-                        } else {
-                            "unavailable"
-                        }
-                        .into(),
-                    ),
-                    (
-                        "cue_sensing_executed".into(),
-                        if plan.sense_cues && residual_trace.is_some() {
-                            "yes"
-                        } else {
-                            "no"
-                        }
-                        .into(),
-                    ),
-                    (
-                        "topology_executed".into(),
-                        if topology_state.is_some() {
-                            "yes"
-                        } else {
-                            "no"
-                        }
-                        .into(),
-                    ),
-                ]);
-                if topology_state.is_some() {
-                    candidate_counts.insert("topology_budget".into(), plan.topology_nodes);
-                }
-                QueryDiagnostics {
-                    candidate_counts,
-                    lane_status,
-                    wave_observability: Some(observability),
-                    trace: Some(serde_json::json!({
-                        "epa": epa_trace,
-                        "residual": residual_trace,
-                    })),
-                }
+            diagnostics: build_query_diagnostics(QueryDiagnosticsInput {
+                query: &query,
+                plan,
+                structured_count: rank_inputs.len(),
+                lexical_count: lexical_ranks.len(),
+                dense_count: dense_ranks.len(),
+                all_lane_count: candidates.candidate_refs().count(),
+                field_dense_count: dense_variants
+                    .values()
+                    .filter(|variants| {
+                        variants.contains("local_field_dense")
+                            || variants.contains("transfer_field_dense")
+                    })
+                    .count(),
+                executed_candidate_bound,
+                epa_trace: epa_trace.as_ref(),
+                residual_trace: residual_trace.as_ref(),
+                topology_executed: topology_state.is_some(),
+                observability,
             }),
         })
     }

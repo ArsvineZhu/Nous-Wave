@@ -21,6 +21,21 @@ pub struct NousRuntime {
     pub memory: Option<MemoryService>,
     pub material: MaterialService,
     pub serving: ServingService,
+    pub providers: RuntimeProviderConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeProviderConfig {
+    pub embedding: RuntimeProviderSection,
+    pub document_extraction: RuntimeProviderSection,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeProviderSection {
+    pub enabled: bool,
+    pub kind: Option<String>,
 }
 
 pub struct RuntimeOptions {
@@ -32,6 +47,7 @@ pub struct RuntimeOptions {
     pub memory_enabled: bool,
     pub serving_options: ServingOptions,
     pub embedding: Option<Arc<dyn TextEmbeddingProvider>>,
+    pub providers: RuntimeProviderConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +55,7 @@ pub struct RuntimeStatus {
     pub api_version: u32,
     pub ready: bool,
     pub capabilities: Vec<CapabilityStatus>,
+    pub providers: RuntimeProviderConfig,
 }
 
 impl NousRuntime {
@@ -93,6 +110,28 @@ impl NousRuntime {
         })
     }
     pub async fn open(options: RuntimeOptions) -> Result<Self> {
+        if options.providers.embedding.enabled {
+            return Err(Error::Unavailable(format!(
+                "provider '{}' is not bundled in this build",
+                options
+                    .providers
+                    .embedding
+                    .kind
+                    .as_deref()
+                    .unwrap_or("embedding")
+            )));
+        }
+        if options.providers.document_extraction.enabled {
+            return Err(Error::Unavailable(format!(
+                "provider '{}' is not bundled in this build",
+                options
+                    .providers
+                    .document_extraction
+                    .kind
+                    .as_deref()
+                    .unwrap_or("document_extraction")
+            )));
+        }
         let store = AuthorityStore::connect(&options.postgres_url, options.max_connections).await?;
         store.migrate().await?;
         let objects = ObjectStore::open(&options.object_root).await?;
@@ -128,6 +167,7 @@ impl NousRuntime {
             memory,
             material,
             serving,
+            providers: options.providers,
         })
     }
 
@@ -193,6 +233,7 @@ impl NousRuntime {
             api_version: API_VERSION,
             ready: self.store.check().await.is_ok(),
             capabilities,
+            providers: self.providers.clone(),
         }
     }
 }

@@ -105,7 +105,10 @@ impl CognitiveRuntimeService {
     }
 
     // Resource routing keeps capability, authority and degradation semantics together.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "resource routing keeps capability, authority and degradation decisions together"
+    )]
     pub async fn resource_actions_for_query(
         &self,
         query: &CognitiveQuery,

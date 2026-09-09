@@ -347,6 +347,8 @@ pub struct ExplicitMemoryInput {
     pub entity_refs: Vec<EntityRef>,
     #[serde(default)]
     pub tags: Vec<TagId>,
+    #[serde(default)]
+    pub tag_order_provenance: Option<serde_json::Value>,
     pub occurred_at: Option<DateTime<Utc>>,
     pub observed_at: DateTime<Utc>,
     pub valid_from: Option<DateTime<Utc>>,
@@ -435,6 +437,87 @@ pub struct ConsolidationRequest {
     pub capability: nous_core::CapabilityRequirement,
     pub representation_text: Option<String>,
     pub semantic_role: Option<String>,
+    #[serde(default)]
+    pub topology: Option<TopologyConsolidationProposal>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TopologyConsolidationProposal {
+    #[serde(default)]
+    pub tags: Vec<TopologyTagProposal>,
+    #[serde(default)]
+    pub anchors: Vec<TopologyAnchorProposal>,
+    #[serde(default)]
+    pub associations: Vec<TopologyAssociationProposal>,
+    #[serde(default)]
+    pub revisions: Vec<TopologyRevisionProposal>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyTagProposal {
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub kind_hint: Option<String>,
+    #[serde(default)]
+    pub tag_id: Option<TagId>,
+    #[serde(default)]
+    pub attach_to: Vec<MemoryRevisionId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyAnchorProposal {
+    #[serde(default)]
+    pub label: Option<String>,
+    pub description: String,
+    #[serde(default)]
+    pub supports: Vec<TopologyAnchorSupport>,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyAnchorSupport {
+    pub reference: CognitiveRef,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyAssociationProposal {
+    pub from: CognitiveRef,
+    pub to: CognitiveRef,
+    pub association_kind: String,
+    pub polarity: AssociationPolarity,
+    pub support_class: AssociationSupportClass,
+    pub support_value: f64,
+    #[serde(default)]
+    pub occurrence_id: Option<OccurrenceId>,
+    #[serde(default)]
+    pub memory_revision_id: Option<MemoryRevisionId>,
+    #[serde(default)]
+    pub bridge_hint: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyRevisionProposal {
+    pub memory_id: MemoryId,
+    pub representation_text: String,
+    #[serde(default)]
+    pub semantic_role: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub evidence: Vec<MemoryRevisionEvidence>,
+    pub relation: MemoryRelation,
+    #[serde(default)]
+    pub occurred_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub valid_from: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub valid_to: Option<DateTime<Utc>>,
+    pub epistemic_class: EpistemicClass,
+    #[serde(default)]
+    pub confidence: Option<f64>,
 }
 
 #[cfg(test)]
@@ -452,6 +535,7 @@ mod tests {
             evidence: Vec::new(),
             entity_refs: Vec::new(),
             tags: Vec::new(),
+            tag_order_provenance: None,
             occurred_at: None,
             observed_at: Utc::now(),
             valid_from: None,

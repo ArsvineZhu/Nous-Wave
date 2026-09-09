@@ -1,8 +1,8 @@
 # Current Nous Wave Architecture
 
-**Status:** architecture authority for the corrective wave  
-**Scope:** semantic ownership and durable system invariants.  
-**Physical implementation defaults are recorded separately in `02-DECISION-LEDGER.md`.
+**Status:** current-state architecture
+**Scope:** semantic ownership and durable system invariants.
+**Physical implementation defaults are recorded separately in `DECISIONS.md`.**
 
 ## 1. System identity
 

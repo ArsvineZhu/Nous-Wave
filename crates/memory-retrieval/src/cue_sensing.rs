@@ -1,6 +1,5 @@
 use crate::*;
 use nalgebra::DMatrix;
-use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpaBasis {
@@ -101,103 +100,129 @@ pub fn build_epa_basis(vectors: &[(u64, Vec<f64>)], embedding_space: &str) -> Op
     }
 }
 
-fn representative_vectors(
+pub(crate) fn representative_vectors(
     vectors: &[(u64, Vec<f64>)],
-    embedding_space: &str,
-    dimension: usize,
+    _embedding_space: &str,
+    _dimension: usize,
 ) -> RepresentativeSet {
-    let directions = [
-        projection_direction(embedding_space, 0, dimension),
-        projection_direction(embedding_space, 1, dimension),
-    ];
-    let mut buckets = BTreeMap::<(u8, u8), Vec<(usize, f64)>>::new();
-    for (index, (_, vector)) in vectors.iter().enumerate() {
-        let scores = directions
-            .iter()
-            .map(|direction| {
-                vector
-                    .iter()
-                    .zip(direction)
-                    .map(|(value, component)| value * component)
-                    .sum::<f64>()
-            })
-            .collect::<Vec<_>>();
-        let bucket = (bucket_score(scores[0]), bucket_score(scores[1]));
-        let residual = vector.iter().map(|value| value * value).sum::<f64>();
-        buckets.entry(bucket).or_default().push((index, residual));
-    }
-
-    let mut selected = HashSet::new();
-    for members in buckets.values_mut() {
-        members.sort_by(|left, right| {
-            left.1
-                .total_cmp(&right.1)
-                .then_with(|| vectors[left.0].0.cmp(&vectors[right.0].0))
-        });
-        if let Some((index, _)) = members.first() {
-            selected.insert(*index);
-        }
-        if let Some((index, _)) = members.last() {
-            selected.insert(*index);
-        }
-    }
-
-    let mut remaining = vectors
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| !selected.contains(index))
-        .map(|(index, (key, vector))| {
-            let residual = vector.iter().map(|value| value * value).sum::<f64>();
-            (index, *key, residual)
-        })
-        .collect::<Vec<_>>();
-    remaining.sort_by(|left, right| {
-        right
-            .2
-            .total_cmp(&left.2)
-            .then_with(|| left.1.cmp(&right.1))
+    let mut sorted = vectors.to_vec();
+    sorted.sort_by(|left, right| {
+        stable_vector_key(&left.1)
+            .cmp(&stable_vector_key(&right.1))
+            .then_with(|| left.0.cmp(&right.0))
     });
-    for (index, _, _) in remaining {
-        if selected.len() >= 256 {
+
+    let mut representative = Vec::<RepresentativeEntry>::new();
+    for (key, vector) in sorted {
+        if let Some((_, count)) = representative
+            .iter_mut()
+            .find(|(existing, _)| cosine(&existing.1, &vector) >= 1.0 - 1e-9)
+        {
+            *count += 1;
+        } else {
+            representative.push(((key, vector), 1));
+        }
+    }
+
+    if representative.len() <= 256 {
+        return (
+            representative
+                .iter()
+                .map(|((key, vector), _)| (*key, vector.clone()))
+                .collect(),
+            representative
+                .iter()
+                .map(|(_, count)| *count as f64)
+                .collect(),
+        );
+    }
+
+    let mut min_distance = vec![2.0; representative.len()];
+    let mut chosen = Vec::new();
+    let mut first = 0;
+    for (index, ((_key, _), _)) in representative.iter().enumerate() {
+        let key_value = stable_vector_key(&representative[index].0.1);
+        if stable_vector_key(&representative[first].0.1) > key_value {
+            first = index;
+        }
+    }
+    chosen.push(first);
+    update_min_distances(&representative, &chosen, &mut min_distance);
+
+    while chosen.len() < 256 {
+        let Some((index, distance)) = min_distance
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !chosen.contains(index))
+            .max_by(|left, right| {
+                left.1.total_cmp(right.1).then_with(|| {
+                    stable_vector_key(&representative[left.0].0.1)
+                        .cmp(&stable_vector_key(&representative[right.0].0.1))
+                })
+            })
+        else {
+            break;
+        };
+        if *distance <= 1e-6 {
             break;
         }
-        selected.insert(index);
+        chosen.push(index);
+        update_min_distances(&representative, &chosen, &mut min_distance);
     }
 
-    let mut indices = selected.into_iter().collect::<Vec<_>>();
-    indices.sort_by_key(|index| vectors[*index].0);
-    let representatives = indices
-        .into_iter()
-        .map(|index| vectors[index].clone())
-        .collect::<Vec<_>>();
-    let weights = representatives.iter().map(|_| 1.0).collect::<Vec<_>>();
-    (representatives, weights)
-}
-
-fn projection_direction(space: &str, axis: usize, dimension: usize) -> Vec<f64> {
-    let mut direction = (0..dimension)
-        .map(|component| {
-            let digest = blake3::hash(
-                format!("nous-epa-projection-v1\0{space}\0{axis}\0{component}").as_bytes(),
-            );
-            f64::from(digest.as_bytes()[0]) / 127.5 - 1.0
-        })
-        .collect::<Vec<_>>();
-    let norm = direction
-        .iter()
-        .map(|value| value * value)
-        .sum::<f64>()
-        .sqrt();
-    if norm > f64::EPSILON {
-        for value in &mut direction {
-            *value /= norm;
+    let mut weights = vec![0.0; chosen.len()];
+    let mut representatives = Vec::with_capacity(chosen.len());
+    for chosen_index in &chosen {
+        representatives.push(representative[*chosen_index].0.clone());
+    }
+    for ((_, vector), count) in &representative {
+        let mut nearest = 0;
+        let mut nearest_distance = f64::MAX;
+        for (index, (_, selected_vector)) in representatives.iter().enumerate() {
+            let distance = 1.0 - cosine(selected_vector, vector).clamp(-1.0, 1.0);
+            if distance < nearest_distance {
+                nearest_distance = distance;
+                nearest = index;
+            }
         }
+        weights[nearest] += *count as f64;
     }
-    direction
+
+    let mut ordered = representatives.into_iter().enumerate().collect::<Vec<_>>();
+    ordered.sort_by_key(|(_, (key, _))| *key);
+    let mut representatives = Vec::with_capacity(ordered.len());
+    let mut ordered_weights = Vec::with_capacity(ordered.len());
+    for (index, (key, vector)) in ordered {
+        representatives.push((key, vector));
+        ordered_weights.push(weights[index]);
+    }
+    (representatives, ordered_weights)
 }
 
-fn bucket_score(score: f64) -> u8 {
-    (((score.clamp(-1.0, 1.0) + 1.0) * 4.0).floor() as u8).min(7)
+type RepresentativeEntry = ((u64, Vec<f64>), u64);
+
+fn update_min_distances(
+    representative: &[RepresentativeEntry],
+    chosen: &[usize],
+    min_distance: &mut [f64],
+) {
+    let last = *chosen.last().expect("selected representative");
+    let last_vector = &representative[last].0.1;
+    for (index, ((_, vector), _)) in representative.iter().enumerate() {
+        if chosen.contains(&index) {
+            continue;
+        }
+        let distance = 1.0 - cosine(last_vector, vector).clamp(-1.0, 1.0);
+        min_distance[index] = min_distance[index].min(distance);
+    }
+}
+
+fn stable_vector_key(vector: &[f64]) -> String {
+    let bytes = vector
+        .iter()
+        .flat_map(|value| value.to_bits().to_le_bytes())
+        .collect::<Vec<_>>();
+    blake3::hash(&bytes).to_hex().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

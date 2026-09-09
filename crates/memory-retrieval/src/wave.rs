@@ -137,7 +137,6 @@ fn merge_propagation_state(existing: &mut PropagationState, next: PropagationSta
 }
 
 // The bounded propagation loop intentionally keeps state, flow and truncation together.
-#[allow(clippy::too_many_lines)]
 pub fn propagate(graph: &WaveGraphGeneration, seeds: &[SourceSeed]) -> QueryRiver {
     propagate_with_config(graph, seeds, graph.config)
 }

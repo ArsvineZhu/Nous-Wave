@@ -7,7 +7,11 @@ use std::collections::HashSet;
 
 impl NousRuntime {
     // Host-selected formation follows the already-committed runtime admission.
-    #[allow(clippy::excessive_nesting, clippy::too_many_lines)]
+    #[expect(
+        clippy::excessive_nesting,
+        clippy::too_many_lines,
+        reason = "observation admission preserves the committed runtime ordering invariant"
+    )]
     pub async fn observe(&self, input: ObservationInput) -> Result<AcceptedObservation> {
         let mut accepted = self.material.record_observation(input.clone()).await?;
         if matches!(input.formation, FormationDirective::None) {
@@ -46,6 +50,7 @@ impl NousRuntime {
                         .filter_map(|mention| mention.entity_ref.clone())
                         .collect(),
                     tags: Vec::new(),
+                    tag_order_provenance: None,
                     occurred_at: input.occurrence.occurred_at,
                     observed_at: input.occurrence.observed_at,
                     valid_from: None,

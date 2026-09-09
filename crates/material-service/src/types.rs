@@ -28,6 +28,7 @@ pub struct DerivationClaim {
     pub producer_signature_id: Uuid,
     pub attempt_id: Uuid,
     pub attempt_no: i32,
+    pub lease_owner: String,
     pub lease_until: DateTime<Utc>,
 }
 

@@ -12,16 +12,17 @@ pub use nous_cognitive_runtime::{
 use nous_core::*;
 use nous_memory_domain::*;
 use nous_memory_retrieval::{
-    CandidateRankInput, CandidateSemanticTrail, CandidateTopologyObservation, DenseGeneration,
-    ResidualConfig, SeedFamily, SeedOrigin, TrailOrder, WaveGraphGeneration, WeightedCognitiveSeed,
-    bounded_restart_field, observe_epa, propagate_weighted_with_budget, rank_candidates,
-    residual_pyramid_with_search, trail_topology_observation, wave_observability,
+    AssociativeExpansion, BoundedWaveExpansion, CandidateRankInput, CandidateSemanticTrail,
+    CandidateTopologyObservation, DenseGeneration, EpaResidualCueSensing, ResidualConfig,
+    SeedFamily, SeedOrigin, SemanticCueSensing, TrailOrder, WaveGraphGeneration,
+    WeightedCognitiveSeed, bounded_restart_field, observe_epa, rank_candidates,
+    trail_topology_observation, wave_observability,
 };
 use nous_object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     sync::Arc,
 };
 use uuid::Uuid;
@@ -39,6 +40,8 @@ pub struct MemoryService {
     pub cognition: nous_cognitive_runtime::CognitiveRuntimeService,
     capabilities: Arc<Vec<CapabilityDescriptor>>,
     pub memory_formation_provider: Option<Arc<dyn MemoryFormationProvider>>,
+    cue_sensing: Arc<dyn SemanticCueSensing>,
+    expansion: Arc<dyn AssociativeExpansion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +60,12 @@ pub struct MemoryView {
     pub evidence: Vec<MemoryRevisionEvidence>,
     pub entities: Vec<EntityRef>,
     pub tags: Vec<TagId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolidationResult {
+    pub memory: Option<MemoryView>,
+    pub topology_changes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,7 +141,9 @@ pub struct RebindEntityRequest {
 }
 
 mod memory;
+mod memory_support;
 mod query;
+mod query_diagnostics;
 mod query_evidence;
 mod query_helpers;
 mod query_projection;

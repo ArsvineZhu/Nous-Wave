@@ -6,7 +6,7 @@ This directory contains the current architecture and system documentation.
 
 1. [`ARCHITECTURE.md`](ARCHITECTURE.md) — semantic ownership and system invariants.
 2. [`DECISIONS.md`](DECISIONS.md) — decision status: LOCKED / DERIVED / DEFAULT / OPEN / FUTURE.
-3. Active implementation handoff/spec — current execution-only decisions.
+3. Active implementation handoff — current execution-only decisions.
 4. [`DESIGN_TRANSFER.md`](DESIGN_TRANSFER.md) — mature-system research transfer and rejection boundaries.
 5. Current implementation.
 
@@ -24,4 +24,4 @@ ExecutionStatus = FROZEN_FOR_CURRENT_WAVE
 
 without becoming permanent cognitive architecture.
 
-The repository must remain understandable from these current-state documents without requiring chat history or a dated execution spec.
+The repository must remain understandable from these current-state documents without requiring chat history or temporary execution material.

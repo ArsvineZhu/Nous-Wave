@@ -6,7 +6,10 @@ use std::collections::HashSet;
 
 impl MemoryService {
     // Evidence projection keeps raw, derived, runtime and Resource result semantics together.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "evidence projection keeps each supported ref class and its provenance explicit"
+    )]
     pub(crate) async fn append_evidence_results(
         &self,
         query: &CognitiveQuery,
@@ -366,6 +369,231 @@ impl MemoryService {
                 result_references.insert(reference);
             }
         }
+        if target_allows_derived && results.len() < query.result_need.limit {
+            let mut source_region_ids = lexical_ranks
+                .keys()
+                .chain(dense_ranks.keys())
+                .filter_map(|reference| match reference {
+                    CognitiveRef::SourceRegion(id) => Some(*id),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            let mut source_region_candidates = source_region_ids
+                .drain()
+                .map(|id| {
+                    let reference = CognitiveRef::SourceRegion(id);
+                    let rank = lexical_ranks
+                        .get(&reference)
+                        .into_iter()
+                        .chain(dense_ranks.get(&reference))
+                        .copied()
+                        .min()
+                        .unwrap_or(usize::MAX);
+                    (rank, id)
+                })
+                .collect::<Vec<_>>();
+            source_region_candidates.sort_by_key(|(rank, id)| (*rank, id.0));
+            for (rank, source_region_id) in source_region_candidates
+                .into_iter()
+                .take(query.result_need.limit.saturating_sub(results.len()))
+            {
+                let reference = CognitiveRef::SourceRegion(source_region_id);
+                if result_references.contains(&reference)
+                    || query
+                        .constraints
+                        .authority
+                        .is_some_and(|authority| authority != AuthorityClass::Evidence)
+                {
+                    continue;
+                }
+                let Some(row) = sqlx::query(
+                    "SELECT s.created_at,a.content_hash,a.media_type FROM source_regions s JOIN artifacts a ON a.artifact_id=s.artifact_id WHERE s.subject_id=$1 AND s.source_region_id=$2",
+                )
+                .bind(query.subject.0)
+                .bind(source_region_id.0)
+                .fetch_optional(self.store.pool())
+                .await
+                .map_err(db)?
+                else {
+                    continue;
+                };
+                let hash: String = row.try_get("content_hash").map_err(db)?;
+                let Ok(bytes) = self.objects.get(&hash).await else {
+                    continue;
+                };
+                let Ok(text) = String::from_utf8(bytes) else {
+                    continue;
+                };
+                let families = evidence_families(&reference, &lexical_ranks, &dense_ranks);
+                let variants = dense_variants_for(&reference, &dense_variants);
+                let score = 1.0 / (60.0 + rank as f64);
+                results.push(CognitiveHit {
+                    reference: reference.clone(),
+                    revision: None,
+                    semantic_role: Some("source_region".into()),
+                    memory_class: None,
+                    representation: Some(text),
+                    authority: AuthorityClass::Evidence,
+                    freshness: FreshnessDescriptor {
+                        observed_at: None,
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                    entity_refs: Vec::new(),
+                    evidence: if query.result_need.need_evidence {
+                        vec![EvidenceHandle {
+                            reference: reference.clone(),
+                            support_role: "source_region".into(),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    match_evidence: MatchEvidence {
+                        families,
+                        base_rank_score: score,
+                        field_contact: 0.0,
+                        structural_score: 0.0,
+                        topology_innovation: 0.0,
+                        wave_observability: 0.0,
+                        direct_seed_evidence: 0.0,
+                        final_score: score,
+                        variants,
+                        explanation: Some("raw source region evidence".into()),
+                    },
+                    materialization: if query.result_need.need_materialization_handles
+                        && materialize_evidence
+                    {
+                        vec![MaterializationHandle {
+                            reference: reference.clone(),
+                            level: "evidence_region".into(),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    supersession_state: None,
+                });
+                result_references.insert(reference);
+            }
+        }
+        if target_allows_derived && results.len() < query.result_need.limit {
+            let mut derived_region_ids = lexical_ranks
+                .keys()
+                .chain(dense_ranks.keys())
+                .filter_map(|reference| match reference {
+                    CognitiveRef::DerivedRegion(id) => Some(*id),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            let mut derived_region_candidates = derived_region_ids
+                .drain()
+                .map(|id| {
+                    let reference = CognitiveRef::DerivedRegion(id);
+                    let rank = lexical_ranks
+                        .get(&reference)
+                        .into_iter()
+                        .chain(dense_ranks.get(&reference))
+                        .copied()
+                        .min()
+                        .unwrap_or(usize::MAX);
+                    (rank, id)
+                })
+                .collect::<Vec<_>>();
+            derived_region_candidates.sort_by_key(|(rank, id)| (*rank, id.0));
+            for (rank, derived_region_id) in derived_region_candidates
+                .into_iter()
+                .take(query.result_need.limit.saturating_sub(results.len()))
+            {
+                let reference = CognitiveRef::DerivedRegion(derived_region_id);
+                if result_references.contains(&reference)
+                    || query
+                        .constraints
+                        .authority
+                        .is_some_and(|authority| authority != AuthorityClass::Interpretation)
+                {
+                    continue;
+                }
+                let Some(row) = sqlx::query(
+                    "SELECT r.created_at,d.payload_text,a.content_hash FROM derived_regions r JOIN derived_representations d ON d.derived_representation_id=r.derived_representation_id LEFT JOIN artifacts a ON a.artifact_id=d.payload_artifact_id WHERE r.subject_id=$1 AND r.derived_region_id=$2",
+                )
+                .bind(query.subject.0)
+                .bind(derived_region_id.0)
+                .fetch_optional(self.store.pool())
+                .await
+                .map_err(db)?
+                else {
+                    continue;
+                };
+                let text = if let Some(text) = row
+                    .try_get::<Option<String>, _>("payload_text")
+                    .map_err(db)?
+                {
+                    Some(text)
+                } else if let Some(hash) = row
+                    .try_get::<Option<String>, _>("content_hash")
+                    .map_err(db)?
+                {
+                    self.objects
+                        .get(&hash)
+                        .await
+                        .ok()
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                } else {
+                    None
+                };
+                let Some(text) = text else {
+                    continue;
+                };
+                let families = evidence_families(&reference, &lexical_ranks, &dense_ranks);
+                let variants = dense_variants_for(&reference, &dense_variants);
+                let score = 1.0 / (60.0 + rank as f64);
+                results.push(CognitiveHit {
+                    reference: reference.clone(),
+                    revision: None,
+                    semantic_role: Some("derived_region".into()),
+                    memory_class: None,
+                    representation: Some(text),
+                    authority: AuthorityClass::Interpretation,
+                    freshness: FreshnessDescriptor {
+                        observed_at: None,
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                    entity_refs: Vec::new(),
+                    evidence: if query.result_need.need_evidence {
+                        vec![EvidenceHandle {
+                            reference: reference.clone(),
+                            support_role: "interpretation_region".into(),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    match_evidence: MatchEvidence {
+                        families,
+                        base_rank_score: score,
+                        field_contact: 0.0,
+                        structural_score: 0.0,
+                        topology_innovation: 0.0,
+                        wave_observability: 0.0,
+                        direct_seed_evidence: 0.0,
+                        final_score: score,
+                        variants,
+                        explanation: Some("persisted derived region evidence".into()),
+                    },
+                    materialization: if query.result_need.need_materialization_handles
+                        && materialize_evidence
+                    {
+                        vec![MaterializationHandle {
+                            reference: reference.clone(),
+                            level: "evidence_region".into(),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    supersession_state: None,
+                });
+                result_references.insert(reference);
+            }
+        }
         if query
             .targets
             .iter()
@@ -429,4 +657,31 @@ impl MemoryService {
         }
         Ok(())
     }
+}
+
+fn evidence_families(
+    reference: &CognitiveRef,
+    lexical_ranks: &std::collections::HashMap<CognitiveRef, usize>,
+    dense_ranks: &std::collections::HashMap<CognitiveRef, usize>,
+) -> Vec<EvidenceFamily> {
+    let mut families = Vec::new();
+    if lexical_ranks.contains_key(reference) {
+        families.push(EvidenceFamily::Lexical);
+    }
+    if dense_ranks.contains_key(reference) {
+        families.push(EvidenceFamily::SemanticDense);
+    }
+    families
+}
+
+fn dense_variants_for(
+    reference: &CognitiveRef,
+    dense_variants: &std::collections::HashMap<CognitiveRef, HashSet<String>>,
+) -> Vec<String> {
+    let mut variants = dense_variants
+        .get(reference)
+        .map(|values| values.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    variants.sort();
+    variants
 }

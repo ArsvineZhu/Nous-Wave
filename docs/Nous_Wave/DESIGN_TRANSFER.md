@@ -8,7 +8,7 @@ Statuses:
 - **PARTIAL** — structure exists but key behavior is missing.
 - **MISSING** — declared transfer is not implemented.
 - **SUPERSEDED** — intentionally replaced by a different Nous design.
-- **FUTURE** — recognized but not required this wave.
+- **FUTURE** — recognized but not required by the current scope.
 
 ## 1. Letta / MemGPT — bounded context management
 
@@ -34,17 +34,17 @@ Session
 - ConsumerWorkingSet: PRESERVED
 - progressive materialization into context: PRESERVED
 
-### Required this wave
-**YES**
+### Current verification
+**IMPLEMENTED**
 
-Implement:
+Verified behavior:
 - `ConsumerWorkingSet` type and service operation;
 - consumer identity/profile input without a persistent N×M activation table;
 - budget-aware selection from ResidentSet + query results + resources;
 - `ContextContribution` construction with provenance/materialization handles;
 - no direct prompt-string composition in core.
 
-Acceptance:
+Verified scenarios:
 - same Session/ResidentSet + two different consumer profiles can yield different bounded working sets;
 - projection alone does not reinforce memory;
 - working set can contain refs/handles without fully materializing payloads.
@@ -68,10 +68,10 @@ Memory should not equal transcript storage; exact/entity/lexical/semantic signal
 ### Current state
 **PRESERVED and corrected**
 
-### Required this wave
-**YES — correction, not redesign**
+### Current verification
+**IMPLEMENTED — correction, not redesign**
 
-Fix:
+Verified corrections:
 - field-dense lane ordering;
 - evidence-family rank pollution;
 - lexical-family truthfulness;
@@ -96,8 +96,8 @@ Cognition needs episode/evidence lineage, valid time, observation time and non-d
 ### Current state
 **PRESERVED**
 
-### Required this wave
-Maintain and test. Do not simplify.
+### Current verification
+Verified preservation points:
 
 Acceptance:
 - contradictory/new revision never destroys original evidence;
@@ -125,8 +125,8 @@ optional durable formation / interpretation / consolidation
 
 Observation commits source state and admits runtime references before optional formation and projection invalidation.
 
-### Required this wave
-**YES — P0**
+### Current verification
+**IMPLEMENTED — P0**
 
 Required order:
 1. validate and record observation/evidence;
@@ -157,10 +157,10 @@ New experience can change current interpretation/topology of prior cognition wit
 
 Explicit provider proposals are validated and committed through Memory-owned formation/consolidation operations.
 
-### Required this wave
-**BOUNDED YES**
+### Current verification
+**BOUNDED IMPLEMENTED**
 
-Implement a narrow **consolidation proposal → validation → commit** path capable of:
+The bounded **consolidation proposal → validation → commit** path supports:
 - creating Integrative Memory;
 - proposing Tag/Anchor/Association changes;
 - proposing new Memory revision only through explicit revision semantics;
@@ -182,10 +182,10 @@ Optional Resource synopsis / integrative derived representations with provenance
 ### Current state
 **MINIMAL CAPABILITY SEAM IMPLEMENTED**
 
-### Required this wave
+### Current verification
 **MINIMAL CAPABILITY SEAM, not full GraphRAG**
 
-Required:
+Current capability:
 - `ResourceSynopsis` / equivalent derived representation remains first-class;
 - a Resource resolver can advertise synopsis/global-summary capability;
 - query planner can prefer a ready synopsis for global/corpus-wide intent;
@@ -211,8 +211,9 @@ Topology is a first-class candidate/addressing channel.
 
 PPR itself is not required. VCP-derived bounded Wave is the current default implementation.
 
-### Required this wave
-Fix current Wave defects while preserving `AssociativeExpansion` seam.
+### Current verification
+Bounded Wave retrieval preserves actual flow, field refinement and the
+`AssociativeExpansion` problem-level seam.
 
 ---
 
@@ -229,10 +230,10 @@ Authority + exact/lexical/dense/topology serving generations.
 
 Each serving family has independent durable generations and projection watermarks.
 
-### Required this wave
-**YES — P0**
+### Current verification
+**IMPLEMENTED — P0**
 
-Replace universal rebuild semantics with explicit invalidation/update ownership:
+Current invalidation/update ownership:
 
 ```text
 ChangeSet
@@ -270,7 +271,7 @@ Memory/cognition must retain representation identity, provenance, lifecycle and 
 ### Current state
 **PRESERVED with durable serving lifecycle**
 
-### Required this wave
+### Current verification
 Serving generations are staged, checksummed, persisted, reopened and atomically selected.
 
 ---
@@ -293,8 +294,8 @@ Serving generations are staged, checksummed, persisted, reopened and atomically 
 ### Current state
 **PRESERVED with current-wave correctness fixes**
 
-### Required this wave
-**YES**
+### Current verification
+**IMPLEMENTED**
 
 Important: VCP is research lineage only. Independent Rust implementation. No source copying/transliteration.
 
@@ -313,15 +314,15 @@ No public protocol fields named after implementation algorithms.
 
 ## 11. Transfer completion matrix
 
-| Transfer | This wave |
+| Transfer | Current state |
 |---|---|
 | Letta ConsumerWorkingSet/ContextContribution | IMPLEMENTED |
 | Mem0 hybrid evidence correctness | IMPLEMENTED |
-| Graphiti temporal/provenance | PRESERVE + TEST |
+| Graphiti temporal/provenance | PRESERVED |
 | LangMem immediate runtime vs later formation | IMPLEMENTED |
-| A-MEM bounded consolidation evolution | IMPLEMENTED |
+| A-MEM bounded consolidation evolution | BOUNDED IMPLEMENTED |
 | GraphRAG global synopsis seam | IMPLEMENTED MINIMAL |
-| HippoRAG associative topology class | PRESERVE |
+| HippoRAG associative topology class | PRESERVED |
 | LightRAG independent incremental projections | IMPLEMENTED |
 | MemOS lifecycle/provenance | IMPLEMENTED |
-| VCP algorithm family | IMPLEMENTED + correctness fixes |
+| VCP algorithm family | IMPLEMENTED DEFAULT + replaceable problem-level seams |

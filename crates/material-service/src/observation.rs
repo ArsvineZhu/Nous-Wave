@@ -3,7 +3,10 @@ use nous_authority_store::database_error as db;
 
 impl MaterialService {
     // Observation admission keeps Authority, CAS and runtime ordering explicit.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "observation admission owns one transaction and its runtime handoff"
+    )]
     pub async fn record_observation(&self, input: ObservationInput) -> Result<AcceptedObservation> {
         self.store.require_subject(input.subject).await?;
         if let Some(session) = input.session {

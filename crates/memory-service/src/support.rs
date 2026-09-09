@@ -152,14 +152,20 @@ impl MemoryService {
         memory: CognitiveRef,
         wave: &WaveGraphGeneration,
     ) -> Result<CandidateSemanticTrail> {
-        let rows = sqlx::query("SELECT tag_id,ordinal FROM memory_revision_tags WHERE memory_revision_id=$1 ORDER BY ordinal NULLS LAST,tag_id")
+        let rows = sqlx::query("SELECT tag_id,ordinal,order_provenance FROM memory_revision_tags WHERE memory_revision_id=$1 ORDER BY ordinal NULLS LAST,tag_id")
             .bind(revision).fetch_all(self.store.pool()).await.map_err(db)?;
-        let ordered = rows.len() >= 2
-            && rows.iter().all(|row| {
-                row.try_get::<Option<i32>, _>("ordinal")
+        let ordinals = rows
+            .iter()
+            .map(|row| row.try_get::<Option<i32>, _>("ordinal").unwrap_or(None))
+            .collect::<Vec<_>>();
+        let provenances = rows
+            .iter()
+            .map(|row| {
+                row.try_get::<Option<serde_json::Value>, _>("order_provenance")
                     .unwrap_or(None)
-                    .is_some()
-            });
+            })
+            .collect::<Vec<_>>();
+        let ordered = semantic_order_is_declared(&ordinals, &provenances);
         let mut nodes = Vec::new();
         if ordered {
             for row in rows {
@@ -203,7 +209,7 @@ impl MemoryService {
             nodes,
             order,
             provenance: Some(if ordered {
-                "memory_revision_tags ordinal/order_provenance".into()
+                "memory_revision_tags explicit order_provenance".into()
             } else {
                 "current Authority topology without declared order".into()
             }),
@@ -253,6 +259,22 @@ impl MemoryService {
             Err(Error::NotFound("cognitive reference not found".into()))
         }
     }
+}
+
+fn semantic_order_is_declared(
+    ordinals: &[Option<i32>],
+    provenances: &[Option<serde_json::Value>],
+) -> bool {
+    if ordinals.len() < 2 || ordinals.len() != provenances.len() {
+        return false;
+    }
+    let mut values = ordinals.iter().copied().flatten().collect::<Vec<_>>();
+    values.sort_unstable();
+    values.len() == ordinals.len()
+        && values.windows(2).all(|pair| pair[0] < pair[1])
+        && provenances
+            .iter()
+            .all(|value| value.as_ref().is_some_and(|value| !value.is_null()))
 }
 
 pub(crate) async fn insert_evidence(
@@ -395,3 +417,34 @@ pub(crate) fn interval_overlaps(
         && requested.start.is_none_or(|start| candidate_end >= start)
 }
 pub(crate) use nous_authority_store::database_error as db;
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::semantic_order_is_declared;
+
+    #[test]
+    fn ordinal_without_provenance_is_unordered() {
+        assert!(!semantic_order_is_declared(
+            &[Some(0), Some(1)],
+            &[None, None]
+        ));
+    }
+
+    #[test]
+    fn explicit_provenance_and_distinct_ordinals_are_ordered() {
+        let provenance = serde_json::json!({"source":"host"});
+        assert!(semantic_order_is_declared(
+            &[Some(0), Some(1)],
+            &[Some(provenance.clone()), Some(provenance)]
+        ));
+    }
+
+    #[test]
+    fn duplicate_ordinals_are_not_ordered() {
+        let provenance = serde_json::json!({"source":"host"});
+        assert!(!semantic_order_is_declared(
+            &[Some(0), Some(0)],
+            &[Some(provenance.clone()), Some(provenance)]
+        ));
+    }
+}

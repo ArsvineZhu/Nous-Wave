@@ -14,6 +14,8 @@ impl MemoryService {
             serving,
             capabilities: Arc::new(Vec::new()),
             memory_formation_provider: None,
+            cue_sensing: Arc::new(EpaResidualCueSensing),
+            expansion: Arc::new(BoundedWaveExpansion),
         }
     }
 

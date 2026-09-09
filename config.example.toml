@@ -23,3 +23,11 @@ root = "./data/serving"
 lexical_enabled = true
 dense_enabled = true
 topology_enabled = true
+
+[providers.embedding]
+enabled = false
+kind = "none"
+
+[providers.document_extraction]
+enabled = false
+kind = "none"

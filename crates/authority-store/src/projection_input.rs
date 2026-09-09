@@ -168,6 +168,28 @@ async fn material_sources(
             anchor_ids: Vec::new(),
         });
     }
+    let rows = sqlx::query("SELECT r.source_region_id,r.created_at,a.content_hash,a.media_type,o.source_class FROM source_regions r JOIN artifacts a ON a.artifact_id=r.artifact_id LEFT JOIN LATERAL (SELECT source_class FROM observation_occurrences WHERE subject_id=r.subject_id AND artifact_id=r.artifact_id ORDER BY observed_at DESC LIMIT 1) o ON true WHERE r.subject_id=$1 ORDER BY r.source_region_id")
+        .bind(subject.0)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(db)?;
+    for row in rows {
+        sources.push(TextProjectionSource {
+            reference: CognitiveRef::SourceRegion(SourceRegionId(
+                row.try_get("source_region_id").map_err(db)?,
+            )),
+            revision: None,
+            text: None,
+            content_hash: Some(row.try_get("content_hash").map_err(db)?),
+            title: None,
+            media_type: row.try_get("media_type").map_err(db)?,
+            source_class: row.try_get("source_class").map_err(db)?,
+            source_region: Some(SourceRegionId(row.try_get("source_region_id").map_err(db)?)),
+            entity_refs: Vec::new(),
+            tag_ids: Vec::new(),
+            anchor_ids: Vec::new(),
+        });
+    }
     let rows = sqlx::query("SELECT d.derived_representation_id,d.source_region_id,d.payload_text,d.representation_kind,a.content_hash,a.media_type FROM derived_representations d LEFT JOIN artifacts a ON a.artifact_id=d.payload_artifact_id WHERE d.subject_id=$1 ORDER BY d.derived_representation_id")
         .bind(subject.0).fetch_all(&mut **tx).await.map_err(db)?;
     for row in rows {
@@ -175,6 +197,35 @@ async fn material_sources(
         sources.push(TextProjectionSource {
             reference: CognitiveRef::DerivedRepresentation(DerivedRepresentationId(
                 row.try_get("derived_representation_id").map_err(db)?,
+            )),
+            revision: None,
+            media_type: if text.is_some() {
+                "text/plain".into()
+            } else {
+                row.try_get::<Option<String>, _>("media_type")
+                    .map_err(db)?
+                    .unwrap_or_else(|| "application/octet-stream".into())
+            },
+            text,
+            content_hash: row.try_get("content_hash").map_err(db)?,
+            title: Some(row.try_get("representation_kind").map_err(db)?),
+            source_class: Some("derived".into()),
+            source_region: Some(SourceRegionId(row.try_get("source_region_id").map_err(db)?)),
+            entity_refs: Vec::new(),
+            tag_ids: Vec::new(),
+            anchor_ids: Vec::new(),
+        });
+    }
+    let rows = sqlx::query("SELECT r.derived_region_id,r.created_at,d.source_region_id,d.payload_text,d.representation_kind,a.content_hash,a.media_type FROM derived_regions r JOIN derived_representations d ON d.derived_representation_id=r.derived_representation_id LEFT JOIN artifacts a ON a.artifact_id=d.payload_artifact_id WHERE r.subject_id=$1 ORDER BY r.derived_region_id")
+        .bind(subject.0)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(db)?;
+    for row in rows {
+        let text: Option<String> = row.try_get("payload_text").map_err(db)?;
+        sources.push(TextProjectionSource {
+            reference: CognitiveRef::DerivedRegion(DerivedRegionId(
+                row.try_get("derived_region_id").map_err(db)?,
             )),
             revision: None,
             media_type: if text.is_some() {

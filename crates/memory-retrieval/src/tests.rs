@@ -1,4 +1,7 @@
 use super::*;
+use crate::cue_sensing::representative_vectors;
+use nous_core::EmbeddingSpaceSignature;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn reference(kind: &str, id: u128) -> CognitiveRef {
     let uuid = uuid::Uuid::from_u128(id);
@@ -201,6 +204,101 @@ fn epa_large_selection_depends_on_distribution_not_input_ordinal() {
 }
 
 #[test]
+fn epa_representatives_are_permutation_stable_and_distribution_sensitive() {
+    let mut vectors = (0..280_u64)
+        .map(|key| {
+            let vector = if key % 10 == 0 {
+                vec![0.0, 1.0, 0.0]
+            } else {
+                vec![1.0, 0.0, 0.0]
+            };
+            (key, normalize(&vector))
+        })
+        .collect::<Vec<_>>();
+    let direct = representative_vectors(&vectors, "space", 3);
+    vectors.reverse();
+    let reversed = representative_vectors(&vectors, "space", 3);
+    let direct_keys = direct.0.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+    let reversed_keys = reversed.0.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+    let mut sorted_direct = direct_keys.clone();
+    let mut sorted_reversed = reversed_keys.clone();
+    sorted_direct.sort_unstable();
+    sorted_reversed.sort_unstable();
+    assert_eq!(sorted_direct, sorted_reversed);
+    assert!(direct.1.iter().sum::<f64>() > 0.0);
+    assert!(
+        direct
+            .0
+            .iter()
+            .any(|(_, vector)| (vector[1] - 1.0).abs() < 1e-9)
+    );
+}
+
+#[test]
+fn epa_duplicate_heavy_selection_preserves_population_weights() {
+    let vectors = (0..400_u64)
+        .map(|key| (key, normalize(&[1.0, 0.0, 0.0])))
+        .collect::<Vec<_>>();
+    let (representatives, weights) = representative_vectors(&vectors, "space", 3);
+    assert_eq!(representatives.len(), 1);
+    assert!((weights[0] - 400.0).abs() < 1e-9);
+}
+
+#[test]
+fn epa_identical_vectors_are_deterministic() {
+    let vectors = vec![(1_u64, normalize(&[1.0, 0.0, 0.0]))];
+    let (representatives, weights) = representative_vectors(&vectors, "space", 3);
+    assert_eq!(representatives.len(), 1);
+    assert_eq!(weights.len(), 1);
+    assert!((weights[0] - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn epa_representative_mean_matches_population_mean() {
+    let vectors = (0..300_u64)
+        .map(|key| {
+            let vector = match key % 5 {
+                0 => vec![0.0, 1.0, 0.0],
+                1 => vec![1.0, 0.0, 0.0],
+                _ => vec![1.0, 1.0, 0.0],
+            };
+            (key, normalize(&vector))
+        })
+        .collect::<Vec<_>>();
+    let (representatives, weights) = representative_vectors(&vectors, "space", 3);
+    let total = weights.iter().sum::<f64>();
+    let mut mean = vec![0.0; 3];
+    for ((_, vector), weight) in representatives.iter().zip(&weights) {
+        for (target, value) in mean.iter_mut().zip(vector) {
+            *target += *weight * value;
+        }
+    }
+    for value in &mut mean {
+        *value /= total;
+    }
+    let expected = vectors.iter().fold(vec![0.0; 3], |mut mean, (_, vector)| {
+        for (target, value) in mean.iter_mut().zip(vector) {
+            *target += value;
+        }
+        mean
+    });
+    let expected = expected
+        .iter()
+        .map(|value| value / vectors.len() as f64)
+        .collect::<Vec<_>>();
+    assert!(
+        mean.iter()
+            .zip(&expected)
+            .all(|(left, right)| (left - right).abs() < 1e-9)
+    );
+}
+
+fn normalize(vector: &[f64]) -> Vec<f64> {
+    let norm = vector.iter().map(|value| value * value).sum::<f64>().sqrt();
+    vector.iter().map(|value| value / norm).collect()
+}
+
+#[test]
 fn pure_bridge_row_uses_the_total_outbound_budget() {
     let node = reference("tag", 99);
     let target = reference("memory", 100);
@@ -236,4 +334,79 @@ fn pure_bridge_row_uses_the_total_outbound_budget() {
     )
     .expect("bridge graph");
     assert!((graph.outbound_mass(0) - graph.config.outbound_budget).abs() < 1e-9);
+}
+
+#[derive(Default)]
+struct CountingCueSense {
+    calls: AtomicUsize,
+}
+
+impl SemanticCueSensing for CountingCueSense {
+    fn sense(
+        &self,
+        _query: &[f32],
+        _generation: &DenseGeneration,
+        _config: ResidualConfig,
+    ) -> Result<Option<ResidualResult>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+}
+
+#[derive(Default)]
+struct CountingExpansion {
+    calls: AtomicUsize,
+}
+
+impl AssociativeExpansion for CountingExpansion {
+    fn expand(
+        &self,
+        graph: &WaveGraphGeneration,
+        seeds: &[WeightedCognitiveSeed],
+        rounds: usize,
+        nodes: usize,
+    ) -> QueryRiver {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        BoundedWaveExpansion.expand(graph, seeds, rounds, nodes)
+    }
+}
+
+#[test]
+fn problem_seams_accept_deterministic_replacement_implementations() {
+    let space = EmbeddingSpaceSignature {
+        space_hash: "seam-test".into(),
+        model_identity: "test".into(),
+        weights_revision: "1".into(),
+        task: "retrieval".into(),
+        input_representation: "text".into(),
+        preprocessing_identity: "identity".into(),
+        preprocessing_revision: "1".into(),
+        dimension: 3,
+        normalization: "l2".into(),
+        output_semantics: "dense_similarity".into(),
+    };
+    let generation = DenseGeneration::new(space, 1).expect("dense generation");
+    let cue = CountingCueSense::default();
+    let sensed = cue
+        .sense(&[1.0, 0.0, 0.0], &generation, ResidualConfig::default())
+        .expect("sense seam");
+    let expansion = CountingExpansion::default();
+    let graph = graph();
+    let river = expansion.expand(
+        &graph,
+        &[WeightedCognitiveSeed {
+            node: 0,
+            weight: 1.0,
+            family: SeedFamily::Tag,
+            origin: SeedOrigin::TagCue,
+            provenance: Some("seam".into()),
+            embedding_space: None,
+        }],
+        1,
+        8,
+    );
+    assert!(sensed.is_none());
+    assert_eq!(cue.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(expansion.calls.load(Ordering::SeqCst), 1);
+    assert!(!river.source_field.is_empty());
 }

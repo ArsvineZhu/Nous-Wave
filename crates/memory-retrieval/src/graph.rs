@@ -208,7 +208,6 @@ impl WaveGraphGeneration {
         })
     }
     // Normalization and CSR publication are one invariant-preserving construction step.
-    #[allow(clippy::too_many_lines)]
     pub fn build(
         mut nodes: Vec<WaveNode>,
         evidence: &[WaveEdgeEvidence],

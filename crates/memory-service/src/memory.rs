@@ -1,3 +1,4 @@
+use super::memory_support::*;
 use super::support::*;
 use super::*;
 use nous_authority_store::ProjectionInvalidation;
@@ -76,8 +77,13 @@ impl MemoryService {
             if !exists {
                 return Err(Error::Invalid("tag does not belong to Subject".into()));
             }
-            sqlx::query("INSERT INTO memory_revision_tags(memory_revision_id,tag_id,role,ordinal,provenance) VALUES($1,$2,'explicit',$3,'{}')")
-                .bind(revision_id.0).bind(tag.0).bind(ordinal as i32).execute(&mut **tx).await.map_err(db)?;
+            let (ordinal, order_provenance) = input
+                .tag_order_provenance
+                .as_ref()
+                .map(|provenance| (Some(ordinal as i32), Some(provenance.clone())))
+                .unwrap_or((None, None));
+            sqlx::query("INSERT INTO memory_revision_tags(memory_revision_id,tag_id,role,ordinal,order_provenance,provenance) VALUES($1,$2,'explicit',$3,$4,'{}')")
+                .bind(revision_id.0).bind(tag.0).bind(ordinal).bind(order_provenance).execute(&mut **tx).await.map_err(db)?;
         }
         let entity_attachment = input.evidence.first().map(|item| item.evidence.clone());
         for entity in &input.entity_refs {
@@ -174,6 +180,7 @@ impl MemoryService {
                     evidence: proposal.evidence,
                     entity_refs: proposal.entity_refs,
                     tags: Vec::new(),
+                    tag_order_provenance: None,
                     occurred_at: proposal.occurred_at,
                     observed_at: Utc::now(),
                     valid_from: proposal.valid_from,
@@ -441,7 +448,10 @@ impl MemoryService {
     }
 
     // Purge coordinates provenance reachability, Authority deletion and CAS cleanup.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "purge coordinates targeted reachability checks, Authority deletion and CAS cleanup"
+    )]
     pub async fn purge_memory(&self, subject: SubjectId, memory: MemoryId) -> Result<()> {
         let guard = self.objects.reference_guard(true).await?;
         let mut tx = self.store.begin().await?;
@@ -467,7 +477,7 @@ impl MemoryService {
         let removable_derived_ids = if derived_ids.is_empty() {
             Vec::new()
         } else {
-            sqlx::query_scalar::<_, Uuid>("SELECT d.derived_representation_id FROM derived_representations d WHERE d.derived_representation_id=ANY($1) AND NOT EXISTS (SELECT 1 FROM memory_revision_evidence e WHERE e.memory_revision_id <> ALL($2) AND (e.derived_representation_id=d.derived_representation_id OR e.derived_region_id IN (SELECT derived_region_id FROM derived_regions WHERE derived_representation_id=d.derived_representation_id)))")
+            sqlx::query_scalar::<_, Uuid>("SELECT d.derived_representation_id FROM derived_representations d WHERE d.derived_representation_id=ANY($1) AND NOT EXISTS (SELECT 1 FROM memory_revision_evidence e WHERE e.memory_revision_id <> ALL($2) AND (e.derived_representation_id=d.derived_representation_id OR e.derived_region_id IN (SELECT derived_region_id FROM derived_regions WHERE derived_representation_id=d.derived_representation_id))) AND NOT EXISTS (SELECT 1 FROM anchor_support s WHERE (s.support_ref_kind='derived_representation' AND s.support_ref=d.derived_representation_id::text) OR (s.support_ref_kind='derived_region' AND s.support_ref IN (SELECT derived_region_id::text FROM derived_regions WHERE derived_representation_id=d.derived_representation_id))) AND NOT EXISTS (SELECT 1 FROM association_evidence a WHERE a.subject_id=d.subject_id AND ((a.from_ref_kind='derived_representation' AND a.from_ref=d.derived_representation_id::text) OR (a.to_ref_kind='derived_representation' AND a.to_ref=d.derived_representation_id::text) OR (a.from_ref_kind='derived_region' AND a.from_ref IN (SELECT derived_region_id::text FROM derived_regions WHERE derived_representation_id=d.derived_representation_id)) OR (a.to_ref_kind='derived_region' AND a.to_ref IN (SELECT derived_region_id::text FROM derived_regions WHERE derived_representation_id=d.derived_representation_id)))) AND NOT EXISTS (SELECT 1 FROM resident_refs r JOIN cognitive_sessions s ON s.session_id=r.session_id WHERE s.subject_id=d.subject_id AND ((r.ref_kind='derived_representation' AND r.ref_value=d.derived_representation_id::text) OR (r.ref_kind='derived_region' AND r.ref_value IN (SELECT derived_region_id::text FROM derived_regions WHERE derived_representation_id=d.derived_representation_id)))) AND NOT EXISTS (SELECT 1 FROM coverage_needs c WHERE c.current_representation_id=d.derived_representation_id) AND NOT EXISTS (SELECT 1 FROM derivations de WHERE de.successful_representation_id=d.derived_representation_id) AND NOT EXISTS (SELECT 1 FROM derived_representations d2 WHERE d2.supersedes=d.derived_representation_id) AND NOT EXISTS (SELECT 1 FROM derived_regions dr2 WHERE dr2.parent_derived_region_id IN (SELECT derived_region_id FROM derived_regions WHERE derived_representation_id=d.derived_representation_id))")
                 .bind(&derived_ids)
                 .bind(&revision_values)
                 .fetch_all(&mut *tx)
@@ -500,8 +510,9 @@ impl MemoryService {
                 .execute(&mut *tx)
                 .await
                 .map_err(db)?;
-            sqlx::query("DELETE FROM derived_representations d WHERE d.derived_representation_id=ANY($1) AND NOT EXISTS (SELECT 1 FROM memory_revision_evidence e WHERE e.derived_representation_id=d.derived_representation_id)")
+            sqlx::query("DELETE FROM derived_representations d WHERE d.derived_representation_id=ANY($1) AND NOT EXISTS (SELECT 1 FROM memory_revision_evidence e WHERE e.memory_revision_id <> ALL($2) AND (e.derived_representation_id=d.derived_representation_id OR e.derived_region_id IN (SELECT derived_region_id FROM derived_regions WHERE derived_representation_id=d.derived_representation_id)))")
                 .bind(&removable_derived_ids)
+                .bind(&revision_values)
                 .execute(&mut *tx)
                 .await
                 .map_err(db)?;
@@ -561,7 +572,7 @@ impl MemoryService {
         artifact_ids.dedup();
         for artifact_id in artifact_ids {
             let Some(hash) = sqlx::query_scalar::<_, String>(
-                "SELECT content_hash FROM artifacts WHERE subject_id=$1 AND artifact_id=$2 AND NOT EXISTS (SELECT 1 FROM observation_occurrences WHERE artifact_id=$2) AND NOT EXISTS (SELECT 1 FROM source_regions WHERE artifact_id=$2) AND NOT EXISTS (SELECT 1 FROM derived_representations WHERE payload_artifact_id=$2)",
+                "SELECT content_hash FROM artifacts WHERE subject_id=$1 AND artifact_id=$2 AND NOT EXISTS (SELECT 1 FROM observation_occurrences WHERE artifact_id=$2) AND NOT EXISTS (SELECT 1 FROM source_regions WHERE artifact_id=$2) AND NOT EXISTS (SELECT 1 FROM derived_representations WHERE payload_artifact_id=$2) AND NOT EXISTS (SELECT 1 FROM character_seeds WHERE artifact_id=$2)",
             )
             .bind(subject.0)
             .bind(artifact_id)
@@ -600,7 +611,7 @@ impl MemoryService {
         &self,
         subject: SubjectId,
         request: ConsolidationRequest,
-    ) -> Result<MemoryView> {
+    ) -> Result<ConsolidationResult> {
         if request.subject != subject {
             return Err(Error::Invalid(
                 "consolidation subject does not match route subject".into(),
@@ -610,6 +621,28 @@ impl MemoryService {
             return Err(Error::Invalid(
                 "consolidation needs source revisions".into(),
             ));
+        }
+        for revision_id in &request.source_memories {
+            let valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM memory_revisions WHERE subject_id=$1 AND memory_revision_id=$2)",
+            )
+            .bind(subject.0)
+            .bind(revision_id.0)
+            .fetch_one(self.store.pool())
+            .await
+            .map_err(db)?;
+            if !valid {
+                return Err(Error::Invalid(
+                    "consolidation source revision is outside Subject".into(),
+                ));
+            }
+        }
+        if matches!(request.target, ConsolidationTarget::TopologyOnly) {
+            let topology = request
+                .topology
+                .as_ref()
+                .ok_or_else(|| Error::Invalid("TopologyOnly needs a topology proposal".into()))?;
+            return self.consolidate_topology(subject, topology).await;
         }
         let mut evidence = Vec::new();
         for revision_id in &request.source_memories {
@@ -638,32 +671,31 @@ impl MemoryService {
             ConsolidationTarget::Integrative => (MemoryClass::Integrative, "schema"),
             ConsolidationTarget::Procedural => (MemoryClass::Procedural, "procedure"),
             ConsolidationTarget::TopologyOnly => {
-                return Err(Error::Invalid(
-                    "TopologyOnly consolidation has no Memory representation".into(),
-                ));
+                unreachable!("TopologyOnly handled above")
             }
         };
-        let memory = self
-            .form_memory(ExplicitMemoryInput {
-                subject,
-                memory_class,
-                semantic_role: request.semantic_role.unwrap_or_else(|| role.into()),
-                representation_text: representation,
-                title: None,
-                evidence,
-                entity_refs: Vec::new(),
-                tags: Vec::new(),
-                occurred_at: None,
-                observed_at: Utc::now(),
-                valid_from: None,
-                valid_to: None,
-                epistemic_class: EpistemicClass::Derived,
-                confidence: None,
-            })
-            .await?;
+        let memory_input = ExplicitMemoryInput {
+            subject,
+            memory_class,
+            semantic_role: request.semantic_role.unwrap_or_else(|| role.into()),
+            representation_text: representation,
+            title: None,
+            evidence,
+            entity_refs: Vec::new(),
+            tags: Vec::new(),
+            tag_order_provenance: None,
+            occurred_at: None,
+            observed_at: Utc::now(),
+            valid_from: None,
+            valid_to: None,
+            epistemic_class: EpistemicClass::Derived,
+            confidence: None,
+        };
+        let mut tx = self.store.begin().await?;
+        let (memory_id, revision_id) = self.insert_memory_authority(&mut tx, &memory_input).await?;
         for source_revision in &request.source_memories {
             sqlx::query("INSERT INTO memory_revision_relations(from_revision_id,to_revision_id,relation,created_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
-                .bind(memory.revision.memory_revision_id.0)
+                .bind(revision_id.0)
                 .bind(source_revision.0)
                 .bind(match memory_class {
                     MemoryClass::Integrative => "integrates",
@@ -671,10 +703,203 @@ impl MemoryService {
                     MemoryClass::Specific => "derived_from",
                 })
                 .bind(Utc::now())
-                .execute(self.store.pool())
+                .execute(&mut *tx)
                 .await
                 .map_err(db)?;
         }
-        Ok(memory)
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation {
+                topology: true,
+                ..ProjectionInvalidation::text()
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(db)?;
+        let memory = self.memory(subject, memory_id, None).await?;
+        Ok(ConsolidationResult {
+            memory: Some(memory),
+            topology_changes: 0,
+        })
+    }
+
+    async fn consolidate_topology(
+        &self,
+        subject: SubjectId,
+        topology: &TopologyConsolidationProposal,
+    ) -> Result<ConsolidationResult> {
+        self.validate_topology_proposal(subject, topology).await?;
+        let mut tx = self.store.begin().await?;
+        let mut changes = 0;
+        for tag in &topology.tags {
+            let tag_id = if let Some(tag_id) = tag.tag_id {
+                tag_id
+            } else {
+                insert_tag_in_tx(
+                    &mut tx,
+                    subject,
+                    &tag.label,
+                    tag.description.as_deref(),
+                    tag.kind_hint.as_deref(),
+                    "consolidation",
+                )
+                .await?
+            };
+            for revision in &tag.attach_to {
+                sqlx::query("INSERT INTO memory_revision_tags(memory_revision_id,tag_id,role,ordinal,order_provenance,provenance) VALUES($1,$2,'inferred',NULL,NULL,$3) ON CONFLICT DO NOTHING")
+                    .bind(revision.0)
+                    .bind(tag_id.0)
+                    .bind(serde_json::json!({"origin":"consolidation"}))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db)?;
+                changes += 1;
+            }
+            changes += 1;
+        }
+        for anchor in &topology.anchors {
+            insert_anchor_in_tx(&mut tx, subject, anchor, "consolidation").await?;
+            changes += 1;
+        }
+        for association in &topology.associations {
+            insert_association_in_tx(&mut tx, subject, association).await?;
+            changes += 1;
+        }
+        for revision in &topology.revisions {
+            let current = self.memory(subject, revision.memory_id, None).await?;
+            insert_revision_in_tx(&mut tx, subject, &current, revision).await?;
+            changes += 1;
+        }
+        nous_authority_store::AuthorityStore::invalidate_in(
+            &mut tx,
+            subject,
+            ProjectionInvalidation {
+                topology: true,
+                ..ProjectionInvalidation::text()
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(db)?;
+        Ok(ConsolidationResult {
+            memory: None,
+            topology_changes: changes,
+        })
+    }
+
+    async fn validate_topology_proposal(
+        &self,
+        subject: SubjectId,
+        proposal: &TopologyConsolidationProposal,
+    ) -> Result<()> {
+        for tag in &proposal.tags {
+            if tag.label.trim().is_empty() {
+                return Err(Error::Invalid("consolidation Tag label is required".into()));
+            }
+            if let Some(tag_id) = tag.tag_id
+                && !self
+                    .reference_in_subject(subject, &CognitiveRef::Tag(tag_id))
+                    .await?
+            {
+                return Err(Error::Invalid(
+                    "consolidation Tag is outside Subject".into(),
+                ));
+            }
+            for revision in &tag.attach_to {
+                if !self
+                    .reference_in_subject(subject, &CognitiveRef::MemoryRevision(*revision))
+                    .await?
+                {
+                    return Err(Error::Invalid(
+                        "consolidation Tag attachment is outside Subject".into(),
+                    ));
+                }
+            }
+        }
+        for anchor in &proposal.anchors {
+            if anchor.description.trim().is_empty() {
+                return Err(Error::Invalid(
+                    "consolidation Anchor description is required".into(),
+                ));
+            }
+            let mut roots = HashSet::new();
+            for support in &anchor.supports {
+                if !self
+                    .reference_in_subject(subject, &support.reference)
+                    .await?
+                {
+                    return Err(Error::Invalid(
+                        "consolidation Anchor support is outside Subject".into(),
+                    ));
+                }
+                if let Some(root) = support_root(&support.reference) {
+                    roots.insert(root);
+                }
+            }
+            if !anchor.confirmed && roots.len() < 2 {
+                return Err(Error::Invalid(
+                    "consolidation-derived Anchor needs two independent support roots".into(),
+                ));
+            }
+        }
+        for association in &proposal.associations {
+            if !association.support_value.is_finite() || association.support_value < 0.0 {
+                return Err(Error::Invalid(
+                    "consolidation Association support_value is invalid".into(),
+                ));
+            }
+            if !self
+                .reference_in_subject(subject, &association.from)
+                .await?
+                || !self.reference_in_subject(subject, &association.to).await?
+            {
+                return Err(Error::Invalid(
+                    "consolidation Association endpoint is outside Subject".into(),
+                ));
+            }
+            if let Some(occurrence) = association.occurrence_id {
+                let valid: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM observation_occurrences WHERE subject_id=$1 AND occurrence_id=$2)",
+                )
+                .bind(subject.0)
+                .bind(occurrence.0)
+                .fetch_one(self.store.pool())
+                .await
+                .map_err(db)?;
+                if !valid {
+                    return Err(Error::Invalid(
+                        "consolidation Association occurrence is outside Subject".into(),
+                    ));
+                }
+            }
+            if let Some(revision) = association.memory_revision_id
+                && !self
+                    .reference_in_subject(subject, &CognitiveRef::MemoryRevision(revision))
+                    .await?
+            {
+                return Err(Error::Invalid(
+                    "consolidation Association revision is outside Subject".into(),
+                ));
+            }
+        }
+        for revision in &proposal.revisions {
+            if revision.representation_text.trim().is_empty()
+                || !self
+                    .reference_in_subject(subject, &CognitiveRef::Memory(revision.memory_id))
+                    .await?
+            {
+                return Err(Error::Invalid(
+                    "consolidation revision target is outside Subject".into(),
+                ));
+            }
+            self.validate_evidence(subject, &revision.evidence).await?;
+            if revision
+                .confidence
+                .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+            {
+                return Err(Error::Invalid("consolidation confidence is invalid".into()));
+            }
+        }
+        Ok(())
     }
 }

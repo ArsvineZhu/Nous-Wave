@@ -4,7 +4,7 @@ use nous_cognitive_runtime::UseFeedback;
 use nous_core::{DerivationId, Error, MemoryId, Result, SubjectId};
 use nous_memory_domain::ExplicitMemoryInput;
 use nous_subject_core::{CharacterSeedInput, CreateSubject};
-use nous_wave::{NousRuntime, RuntimeOptions, RuntimeStatus};
+use nous_wave::{NousRuntime, RuntimeOptions, RuntimeProviderConfig, RuntimeStatus};
 use postgresql_embedded::{PostgreSQL, SettingsBuilder, VersionReq};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -169,6 +169,8 @@ struct Config {
     object_store: ObjectStoreConfig,
     #[serde(default)]
     retrieval: RetrievalConfig,
+    #[serde(default)]
+    providers: RuntimeProviderConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -323,6 +325,7 @@ async fn run() -> Result<()> {
             memory_enabled: config.memory_enabled,
         },
         embedding: None,
+        providers: config.providers,
     })
     .await;
     let runtime = match runtime_result {
@@ -339,7 +342,10 @@ async fn run() -> Result<()> {
 }
 
 // CLI dispatch is the stable host boundary for the modular runtime composition.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "CLI dispatch is the single host boundary for the shipped commands"
+)]
 async fn dispatch(command: Command, runtime: NousRuntime, bind: SocketAddr) -> Result<()> {
     match command {
         Command::Serve => {

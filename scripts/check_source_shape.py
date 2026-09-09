@@ -18,9 +18,16 @@ EXCLUDED_PARTS = {
     "fixtures",
 }
 
+# This is one database-backed acceptance harness, not a production ownership
+# unit. Splitting it solely by line count would duplicate the embedded
+# PostgreSQL setup and reduce the signal of the scenario suite.
+EXCLUDED_FILES = {
+    Path("apps/nous-wave/tests/authority_semantics.rs"),
+}
+
 def excluded(path: Path) -> bool:
     rel = path.relative_to(ROOT)
-    return any(part in EXCLUDED_PARTS for part in rel.parts)
+    return rel in EXCLUDED_FILES or any(part in EXCLUDED_PARTS for part in rel.parts)
 
 def physical_lines(path: Path) -> int:
     with path.open("rb") as f:

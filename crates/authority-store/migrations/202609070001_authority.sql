@@ -378,19 +378,6 @@ CREATE TABLE serving_current (
     generation_id uuid NOT NULL REFERENCES serving_generations(generation_id) ON DELETE CASCADE,
     PRIMARY KEY(subject_id, kind, space_signature)
 );
-CREATE TABLE vector_records (
-    serving_generation_id uuid NOT NULL REFERENCES serving_generations(generation_id) ON DELETE CASCADE,
-    serving_doc_id bigint NOT NULL,
-    ref_kind text NOT NULL,
-    ref_value text NOT NULL,
-    embedding_space_hash text NOT NULL,
-    producer_signature_hash text NOT NULL,
-    representation_kind text NOT NULL,
-    source_region_id uuid NULL REFERENCES source_regions(source_region_id),
-    vector jsonb NOT NULL,
-    PRIMARY KEY(serving_generation_id, serving_doc_id)
-);
-
 CREATE INDEX memory_revisions_subject_time_idx
     ON memory_revisions(subject_id, observed_at DESC);
 CREATE INDEX memory_revision_evidence_occurrence_idx

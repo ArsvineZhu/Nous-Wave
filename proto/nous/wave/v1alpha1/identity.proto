@@ -1,0 +1,26 @@
+syntax = "proto3";
+package nous.wave.v1alpha1;
+import "nous/wave/v1alpha1/types.proto";
+message IdentityBinding {
+  string lexical_ref = 1;
+  CognitiveRef canonical = 2;
+  string display_name = 3;
+  repeated string aliases = 4;
+  string status = 5;
+}
+message BindIdentityRequest {
+  string subject_id = 1;
+  CognitiveRef canonical = 2;
+  string display_name = 3;
+  repeated string aliases = 4;
+}
+message ResolveIdentityRequest {
+  string subject_id = 1;
+  string kind = 2;
+  oneof locator { string name = 3; string lexical_ref = 4; }
+}
+message ResolveIdentityResponse { repeated IdentityBinding candidates = 1; string status = 2; }
+service IdentityService {
+  rpc BindIdentity(BindIdentityRequest) returns (IdentityBinding);
+  rpc ResolveIdentity(ResolveIdentityRequest) returns (ResolveIdentityResponse);
+}

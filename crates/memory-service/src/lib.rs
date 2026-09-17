@@ -1,13 +1,11 @@
 //! Application orchestration for the first Nous Wave production wave.
 
-mod embedding;
 mod support;
 
 use chrono::{DateTime, Utc};
 use nous_authority_store::AuthorityStore;
 pub use nous_cognitive_runtime::{
-    ResidentView, ResourceMaterial, ResourceQuery, ResourceQueryResult, ResourceResolver,
-    ResourceUpsert, ResourceView, SessionView, UseFeedback, UseFeedbackEvent,
+    ResidentView, ResourceUpsert, ResourceView, SessionView, UseFeedback, UseFeedbackEvent,
 };
 use nous_core::*;
 use nous_memory_domain::*;
@@ -27,7 +25,6 @@ use std::{
 };
 use uuid::Uuid;
 
-pub use embedding::{MemoryFormationProvider, MemoryFormationRequest};
 pub use nous_core::{CognitiveQuery, CognitiveQueryResult};
 pub use nous_material::{AcceptedObservation, ObservationInput, ObservationMaterial};
 use nous_serving::TextEmbeddingRequest;
@@ -39,7 +36,6 @@ pub struct MemoryService {
     pub serving: nous_serving::ServingService,
     pub cognition: nous_cognitive_runtime::CognitiveRuntimeService,
     capabilities: Arc<Vec<CapabilityDescriptor>>,
-    pub memory_formation_provider: Option<Arc<dyn MemoryFormationProvider>>,
     cue_sensing: Arc<dyn SemanticCueSensing>,
     expansion: Arc<dyn AssociativeExpansion>,
 }
@@ -70,6 +66,7 @@ pub struct ConsolidationResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviseMemoryInput {
+    pub expected_head_revision: i64,
     #[serde(default)]
     pub subject: SubjectId,
     #[serde(default)]
@@ -141,6 +138,7 @@ pub struct RebindEntityRequest {
 }
 
 mod memory;
+mod memory_lifecycle;
 mod memory_support;
 mod query;
 mod query_diagnostics;

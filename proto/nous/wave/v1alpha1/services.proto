@@ -1,0 +1,47 @@
+syntax = "proto3";
+package nous.wave.v1alpha1;
+import "nous/wave/v1alpha1/types.proto";
+import "google/protobuf/empty.proto";
+import "nous/wave/v1alpha1/management.proto";
+
+service SubjectService {
+  rpc CreateSubject(CreateSubjectRequest) returns (Subject);
+  rpc GetSubject(SubjectRequest) returns (Subject);
+  rpc ListSubjects(ListRequest) returns (ListSubjectsResponse);
+  rpc GetCharacterSeed(SubjectRequest) returns (SeedRevision);
+  rpc ReviseCharacterSeed(ReviseCharacterSeedRequest) returns (SeedRevision);
+}
+service CognitionService {
+  rpc OpenSession(SubjectRequest) returns (Session);
+  rpc GetSession(ObjectRequest) returns (Session);
+  rpc ListSessions(ListRequest) returns (ListSessionsResponse);
+  rpc CloseSession(ObjectRequest) returns (Session);
+  rpc RecordObservation(ObservationInput) returns (AcceptedObservation);
+  rpc Query(QueryRequest) returns (QueryResponse);
+  rpc ReportUse(ReportUseRequest) returns (google.protobuf.Empty);
+  rpc MutateFocus(MutateFocusRequest) returns (FocusResponse);
+  rpc GetFocus(FocusRequest) returns (FocusResponse);
+  rpc ListFocuses(FocusRequest) returns (ListFocusesResponse);
+  rpc BuildProjection(ProjectionRequest) returns (Projection);
+  rpc BuildManagedContext(ManagedContextRequest) returns (ManagedContextResponse);
+}
+service MemoryService {
+  rpc ConsolidateMemory(ConsolidateMemoryRequest) returns (Memory);
+  rpc GetMemory(ObjectRequest) returns (Memory);
+  rpc ListMemories(ListRequest) returns (ListMemoriesResponse);
+  rpc GetMemoryRevision(ObjectRequest) returns (Memory);
+  rpc ListMemoryRevisions(MemoryHistoryRequest) returns (ListMemoriesResponse);
+  rpc FormMemory(FormMemoryRequest) returns (Memory);
+  rpc ReviseMemory(ReviseMemoryRequest) returns (Memory);
+  rpc SuppressMemory(MemoryMutationRequest) returns (Memory);
+  rpc RestoreMemory(MemoryMutationRequest) returns (Memory);
+  rpc PurgeMemory(MemoryMutationRequest) returns (google.protobuf.Empty);
+}
+service MaterialService {
+  rpc GetOccurrence(ObjectRequest) returns (Occurrence);
+  rpc GetSourceRegion(ObjectRequest) returns (SourceRegion);
+  rpc GetDerivedRepresentation(ObjectRequest) returns (DerivedRepresentation);
+  rpc GetArtifact(ObjectRequest) returns (Artifact);
+  rpc ListArtifacts(ListRequest) returns (ListArtifactsResponse);
+  rpc MaterializeEvidence(MaterializeRequest) returns (MaterializedEvidence);
+}

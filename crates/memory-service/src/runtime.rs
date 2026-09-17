@@ -13,7 +13,6 @@ impl MemoryService {
             cognition,
             serving,
             capabilities: Arc::new(Vec::new()),
-            memory_formation_provider: None,
             cue_sensing: Arc::new(EpaResidualCueSensing),
             expansion: Arc::new(BoundedWaveExpansion),
         }
@@ -21,14 +20,6 @@ impl MemoryService {
 
     pub fn with_capabilities(mut self, capabilities: Vec<CapabilityDescriptor>) -> Self {
         self.capabilities = Arc::new(capabilities);
-        self
-    }
-
-    pub fn with_memory_formation_provider(
-        mut self,
-        provider: Arc<dyn MemoryFormationProvider>,
-    ) -> Self {
-        self.memory_formation_provider = Some(provider);
         self
     }
 
@@ -102,13 +93,6 @@ impl MemoryService {
                     .then_some("fewer than eight compatible Tag vectors".into()),
             },
         ]);
-        if self.memory_formation_provider.is_some() {
-            capabilities.push(CapabilityStatus {
-                capability_id: "memory.formation.text".into(),
-                status: Readiness::Ready,
-                reason: None,
-            });
-        }
         RuntimeStatus {
             api_version: API_VERSION,
             ready: true,

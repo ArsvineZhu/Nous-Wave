@@ -30,7 +30,7 @@ impl AuthorityStore {
             CognitiveRef::Occurrence(id) => sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM observation_occurrences WHERE subject_id=$1 AND occurrence_id=$2)").bind(subject.0).bind(id.0).fetch_one(self.pool()).await.map_err(db)?,
             CognitiveRef::Entity(id) => {
                 EntityRef::new(id.as_str())?;
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM observation_occurrences WHERE subject_id=$1 AND actor_entity_ref=$2) OR EXISTS(SELECT 1 FROM entity_mentions m JOIN entity_binding_revisions b ON b.mention_id=m.mention_id WHERE m.subject_id=$1 AND b.revision_no=(SELECT max(b2.revision_no) FROM entity_binding_revisions b2 WHERE b2.mention_id=b.mention_id) AND b.binding_state='bound' AND b.entity_ref=$2)")
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM observation_occurrences WHERE subject_id=$1 AND actor_entity_ref=$2) OR EXISTS(SELECT 1 FROM entity_mentions m JOIN entity_binding_revisions b ON b.mention_id=m.mention_id WHERE m.subject_id=$1 AND b.revision_no=(SELECT max(b2.revision_no) FROM entity_binding_revisions b2 WHERE b2.mention_id=b.mention_id) AND b.binding_state='bound' AND b.entity_ref=$2) OR EXISTS(SELECT 1 FROM lexical_visibility v JOIN lexical_bindings l ON l.lexical_ref=v.lexical_ref WHERE v.subject_id=$1 AND l.object_kind='entity' AND l.canonical_ref=$2 AND l.tombstoned_at IS NULL)")
                     .bind(subject.0)
                     .bind(id.as_str())
                     .fetch_one(self.pool())

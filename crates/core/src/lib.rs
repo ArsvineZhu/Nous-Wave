@@ -438,6 +438,7 @@ pub struct MaterializationHandle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextContribution {
+    pub source_revision: Option<MemoryRevisionId>,
     pub reference: CognitiveRef,
     pub semantic_role: String,
     pub text: Option<String>,

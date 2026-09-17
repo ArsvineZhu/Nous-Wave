@@ -5,18 +5,6 @@ pub struct UploadMetadata {
     pub media_type: String,
     #[serde(default)]
     pub metadata: serde_json::Value,
-    #[serde(default = "default_source_class")]
-    pub source_class: SourceClass,
-    pub external_object_ref: Option<ObjectRef>,
-    pub occurred_at: Option<DateTime<Utc>>,
-    #[serde(default = "Utc::now")]
-    pub observed_at: DateTime<Utc>,
-    pub conversation_ref: Option<String>,
-    pub actor_entity_ref: Option<EntityRef>,
-}
-
-fn default_source_class() -> SourceClass {
-    SourceClass::File
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

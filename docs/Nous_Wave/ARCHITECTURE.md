@@ -120,7 +120,7 @@ MicroSystem
 
 A MicroSystem is not a process/container/network service/plugin marketplace.
 
-Current deployment remains a modular monolith using static/startup composition.
+MicroSystems use explicit static composition. The authorized Architecture Rebase target is a TypeScript Cognitive Host supervising a Rust Cognitive Kernel, exposed through Core + official Client. The existing Rust deployment is being migrated under [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md).
 
 ## 5. Cognitive material and evidence
 

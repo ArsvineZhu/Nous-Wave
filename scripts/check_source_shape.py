@@ -22,7 +22,7 @@ EXCLUDED_PARTS = {
 # unit. Splitting it solely by line count would duplicate the embedded
 # PostgreSQL setup and reduce the signal of the scenario suite.
 EXCLUDED_FILES = {
-    Path("apps/nous-wave/tests/authority_semantics.rs"),
+    Path("apps/nous-kernel/tests/authority_semantics.rs"),
 }
 
 def excluded(path: Path) -> bool:

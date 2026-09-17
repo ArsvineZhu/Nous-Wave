@@ -2,7 +2,9 @@
 mod artifacts;
 mod build;
 mod lifecycle;
+mod material;
 mod provider;
+pub use material::*;
 
 use nous_authority_store::{AuthorityStore, ServingRecord};
 use nous_core::*;

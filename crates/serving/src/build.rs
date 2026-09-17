@@ -101,7 +101,10 @@ impl ServingService {
         Ok(input.watermark)
     }
 
-    async fn documents(&self, sources: Vec<TextProjectionSource>) -> Result<Vec<LexicalDocument>> {
+    pub(crate) async fn documents(
+        &self,
+        sources: Vec<TextProjectionSource>,
+    ) -> Result<Vec<LexicalDocument>> {
         let mut documents = Vec::new();
         for source in sources {
             let text = if let Some(text) = source.text {

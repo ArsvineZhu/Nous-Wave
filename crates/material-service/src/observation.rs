@@ -2,17 +2,50 @@ use super::*;
 use nous_authority_store::database_error as db;
 
 impl MaterialService {
+    pub async fn record_observation(&self, input: ObservationInput) -> Result<AcceptedObservation> {
+        self.record_observation_once(input, None).await
+    }
+
     // Observation admission keeps Authority, CAS and runtime ordering explicit.
     #[expect(
         clippy::too_many_lines,
         reason = "observation admission owns one transaction and its runtime handoff"
     )]
-    pub async fn record_observation(&self, input: ObservationInput) -> Result<AcceptedObservation> {
+    pub async fn record_observation_once(
+        &self,
+        input: ObservationInput,
+        request_id: Option<Uuid>,
+    ) -> Result<AcceptedObservation> {
         self.store.require_subject(input.subject).await?;
         if let Some(session) = input.session {
             self.cognition
                 .require_session(input.subject, session)
                 .await?;
+        }
+        let mut tx = self.store.begin().await?;
+        let request_digest = blake3::hash(
+            &serde_json::to_vec(&input).map_err(|error| Error::Invalid(error.to_string()))?,
+        )
+        .to_hex()
+        .to_string();
+        if let Some(request_id) = request_id {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+                .bind(request_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(db)?;
+            if let Some(row) = sqlx::query("SELECT subject_id,request_digest,accepted FROM observation_request_bindings WHERE request_id=$1")
+                .bind(request_id).fetch_optional(&mut *tx).await.map_err(db)? {
+                if row.try_get::<Uuid,_>("subject_id").map_err(db)? != input.subject.0
+                    || row.try_get::<String,_>("request_digest").map_err(db)? != request_digest {
+                    return Err(Error::Conflict("Observation request_id already binds different input".into()));
+                }
+                let accepted: AcceptedObservation = serde_json::from_value(row.try_get("accepted").map_err(db)?)
+                    .map_err(|error| Error::Infrastructure(error.to_string()))?;
+                tx.commit().await.map_err(db)?;
+                self.admit_observation(&input, accepted.occurrence.occurrence_id).await?;
+                return Ok(accepted);
+            }
         }
         let now = Utc::now();
         let object_guard = if matches!(
@@ -57,7 +90,6 @@ impl MaterialService {
         if let Some(object) = &occurrence.external_object_ref {
             ObjectRef::new(object.as_str())?;
         }
-        let mut tx = self.store.begin().await?;
         let artifact = if let Some(mut artifact) = artifact {
             let existing = sqlx::query("SELECT artifact_id,byte_length,storage_key,created_at,metadata FROM artifacts WHERE subject_id=$1 AND content_hash=$2")
                 .bind(input.subject.0).bind(&artifact.content_hash).fetch_optional(&mut *tx).await.map_err(db)?;
@@ -140,9 +172,31 @@ impl MaterialService {
             ProjectionInvalidation::text(),
         )
         .await?;
+        let accepted = AcceptedObservation {
+            artifact,
+            occurrence,
+            source_region,
+            mention_ids,
+            resident: input.session.is_some() && input.runtime.admit,
+            memory_revisions: Vec::new(),
+        };
+        if let Some(request_id) = request_id {
+            sqlx::query("INSERT INTO observation_request_bindings(request_id,subject_id,request_digest,occurrence_id,accepted) VALUES($1,$2,$3,$4,$5)")
+                .bind(request_id).bind(input.subject.0).bind(request_digest).bind(occurrence_id.0)
+                .bind(serde_json::to_value(&accepted).map_err(|error| Error::Infrastructure(error.to_string()))?)
+                .execute(&mut *tx).await.map_err(db)?;
+        }
         tx.commit().await.map_err(db)?;
         drop(object_guard);
-        let memory_revisions = Vec::new();
+        self.admit_observation(&input, occurrence_id).await?;
+        Ok(accepted)
+    }
+
+    async fn admit_observation(
+        &self,
+        input: &ObservationInput,
+        occurrence_id: OccurrenceId,
+    ) -> Result<()> {
         if let Some(session) = input.session.filter(|_| input.runtime.admit) {
             self.cognition
                 .admit(
@@ -177,16 +231,7 @@ impl MaterialService {
             }
             self.cognition.evict_if_needed(session).await?;
         }
-        // Runtime continuity is admitted before projection invalidation. A serving
-        // failure cannot erase the durable observation or its resident reference.
-        Ok(AcceptedObservation {
-            artifact,
-            occurrence,
-            source_region,
-            mention_ids,
-            resident: input.session.is_some() && input.runtime.admit,
-            memory_revisions,
-        })
+        Ok(())
     }
 
     async fn material_to_artifact(
@@ -255,12 +300,12 @@ impl MaterialService {
         Ok((Some(artifact), Some(bytes)))
     }
 
-    pub async fn ingest_stream<S>(
+    pub async fn upload_stream<S>(
         &self,
         subject: SubjectId,
         metadata: UploadMetadata,
         chunks: S,
-    ) -> Result<AcceptedObservation>
+    ) -> Result<Artifact>
     where
         S: Stream<Item = Result<Vec<u8>>> + Send,
     {
@@ -288,30 +333,8 @@ impl MaterialService {
         .await
         .map_err(db)?;
         let artifact = self.artifact(subject, ArtifactId(artifact_id)).await?;
-        let observed_at = metadata.observed_at;
-        let result = self
-            .record_observation(ObservationInput {
-                subject,
-                session: None,
-                occurrence: OccurrenceDescriptor {
-                    source_class: metadata.source_class,
-                    external_object_ref: metadata.external_object_ref,
-                    occurred_at: metadata.occurred_at,
-                    observed_at,
-                    conversation_ref: metadata.conversation_ref,
-                    actor_entity_ref: metadata.actor_entity_ref,
-                    context: serde_json::json!({}),
-                },
-                material: ObservationMaterial::ArtifactRef {
-                    artifact_id: artifact.artifact_id,
-                },
-                entities: Vec::new(),
-                formation: FormationDirective::None,
-                runtime: RuntimeDirective::default(),
-            })
-            .await;
         drop(guard);
-        result
+        Ok(artifact)
     }
 
     pub async fn artifact(&self, subject: SubjectId, artifact: ArtifactId) -> Result<Artifact> {

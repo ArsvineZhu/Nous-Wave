@@ -1,0 +1,23 @@
+{
+  "name": "nous-wave-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.4.1",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "start": "tsx apps/nous-core/src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "generate": "buf generate",
+    "proto:check": "buf lint",
+    "check": "pnpm proto:check && pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "1.73.0",
+    "@bufbuild/protoc-gen-es": "2.15.0",
+    "@types/node": "22.20.3",
+    "typescript": "7.0.2",
+    "tsx": "4.23.13",
+    "vitest": "5.0.1"
+  }
+}

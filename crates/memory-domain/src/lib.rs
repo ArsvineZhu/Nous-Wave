@@ -28,6 +28,7 @@ impl MemoryClass {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryObject {
+    pub head_revision: i64,
     pub memory_id: MemoryId,
     pub subject_id: SubjectId,
     pub memory_class: MemoryClass,

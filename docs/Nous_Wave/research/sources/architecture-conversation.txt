@@ -1,0 +1,1599 @@
+星期三 21:30
+Session-Handoff-2026-09-09-20-47.md
+文件
+读取交接内容，继续研究 Nous Wave。仓库上次纠正已完成，可以进入下一步。本次不用深入审查仓库，主要确定新架构实现方式。
+
+我已经按交接内容恢复了当前研究状态。本轮我没有重新深挖仓库实现，而是把注意力放在“新架构怎样真正落地”。交接中此前确认的约束继续成立：Subject/Agent/Persona 分离、Session-scoped Steward、Projection 作为共享基础设施、Managed/Assistive 双模式、LLM 可降级、Authority 与运行时投影严格分离，以及 Rust-only 决策已经解除。
+
+这轮研究后，我认为已经可以把新架构从“方向”收敛到一套相当明确的实现。
+
+1. 总体架构可以正式收敛为这一形态
+                    Consumer / Agent / Heptalogos
+                              │
+                    ┌─────────▼──────────┐
+                    │ Nous Cognitive Host │
+                    │    TypeScript       │
+                    │                     │
+                    │ Session Runtime     │
+                    │ Focus Runtime       │
+                    │ Projection Runtime  │
+                    │ Context Compiler    │
+                    │ Steward             │
+                    │ Model Runtime       │
+                    │ Nous Query Language │
+                    │ Config Resolver     │
+                    └─────────┬──────────┘
+                              │
+                       ConnectRPC
+                  Protobuf / binary or JSON
+                              │
+                    ┌─────────▼──────────┐
+                    │ Nous Cognitive      │
+                    │ Kernel — Rust       │
+                    │                     │
+                    │ Authority           │
+                    │ Transactions        │
+                    │ Memory              │
+                    │ Retrieval / Ranking │
+                    │ Serving / Indexes   │
+                    │ Provenance          │
+                    │ Resource Storage    │
+                    │ Runtime Checkpoints │
+                    └─────────────────────┘
+
+但这里有一个重要修正：
+
+TypeScript Host 是逻辑运行时，而不必永远是独立进程。
+
+如果未来 Heptalogos 本身就是 Node/TypeScript 应用，那么最合理的形态是：
+
+Heptalogos process
+  └─ @nous-wave/host
+       └─ spawn nous-kernel
+
+也就是说，最终常见部署可能只有一个 JS 主进程和一个 Rust native sidecar，而不是三个服务。Nous Wave 独立运行时，才把 Host 包装成自己的 Node 进程。
+
+这比“Rust 微服务 + TS 微服务 + UI 服务”干净很多，也没有引入微服务架构。
+
+2. Rust ↔ TypeScript：我现在推荐 ConnectRPC，而不是 N-API
+
+这是这轮研究中最值得改变原先判断的一点。
+
+此前 ConnectRPC 的问题是 Rust 一侧缺乏真正成熟的实现。但截至 2026 年 9 月，情况已经改变：connect-rust 已经进入官方 connectrpc GitHub 组织，最新 v0.9.0 于 2026-08-25 发布。它虽然仍然标记为 pre-1.0，但已经通过完整 Connect/gRPC/gRPC-Web conformance suite，并基于 Tower，可以直接与 Axum/Hyper 体系组合。
+
+Connect 自身同时支持 Connect、gRPC 和 gRPC-Web；Node 实现支持 unary 和三类 streaming，Connect 协议本身还能直接走 HTTP/1.1 或 HTTP/2。
+
+因此我现在的选择是：
+
+问题	结论
+Rust ↔ TS schema	Protobuf
+RPC	ConnectRPC
+默认本地传输	loopback Connect/HTTP
+编码	binary Protobuf 默认；JSON 用于调试
+Rust implementation	connectrpc/connect-rust，固定版本
+TS implementation	Connect-ES / Connect-Node
+Schema tooling	Buf + Protobuf-ES
+N-API	不作为 Kernel 边界；只保留未来极窄 hot-path 的可能
+gRPC/tonic	fallback，而非首选
+
+Buf 已经可以从同一 .proto 定义生成 TypeScript、Rust 等多语言代码，Protobuf-ES 当前也直接生成普通 TypeScript 类型和 schema，而不是过去那类笨重 JS wrapper。
+
+为什么不是 napi-rs
+
+Node-API 本身确实提供跨 Node major 的 ABI 稳定性，napi-rs 现在也已经相当成熟。
+
+但是它不适合 Nous Kernel：
+
+Node process crash
+      ↓
+native addon 也一起死
+
+Rust panic / UB / native dependency failure
+      ↓
+Host 也一起死
+
+Kernel 无法自然独立运行
+      ↓
+degraded mode 变困难
+
+Rust DB / Tokio / embedded PostgreSQL / index runtime
+      ↓
+全部塞进 Node 生命周期
+
+这恰好破坏我们最需要的两个性质：故障隔离和 Kernel standalone degradation。
+
+所以 N-API 可以以后拿来包装某个真正需要纳秒/微秒级跨界调用的 Rust 算法，但绝不能让整个 Nous Kernel 变成 Node addon。
+
+connect-rust 的 pre-1.0 风险怎么处理
+
+不是假装风险不存在，而是做边界隔离。
+
+Rust 内部的 Memory、Authority、Retrieval 等 crate 禁止直接依赖 generated Connect/Buffa 类型。
+
+应该是：
+
+Connect request
+   ↓
+transport adapter
+   ↓
+domain command/query
+   ↓
+Rust core
+   ↓
+domain result
+   ↓
+transport adapter
+   ↓
+Connect response
+
+也就是说：
+
+connectrpc / buffa / protobuf
+=
+transport concern
+
+绝不 =
+Nous domain model
+
+那么即使未来 Connect Rust 1.0 API 大改，最坏也只是重写 transport adapter。
+
+由于 Nous Wave 仍处于 PRE_PRODUCTION，这种风险比长期把整个系统绑死在低层 FFI 上小得多。
+
+3. Rust Kernel 的边界现在应该非常严格
+
+Rust 不应继续承担“因为以前都是 Rust，所以新东西也写 Rust”。
+
+Rust 应只拥有三类东西。
+
+第一类是 Cognitive Authority，包括 Memory、Persona 的 authoritative representation、Relationship authoritative state、Goals/Epistemic 等未来系统的可信状态、provenance、版本和 derivation fencing。
+
+第二类是 data plane，包括数据库事务、资源、索引、embedding/vector search、全文检索、graph traversal、Wave/Serving、candidate generation/ranking 等。
+
+第三类是 correctness boundary，即 Subject isolation、所有权检查、proposal validation、authority mutation、transaction atomicity。
+
+这意味着一个重要的新原则：
+
+LLM 可以决定“建议修改什么”；只有 Kernel 可以决定“这个修改是否允许成为 Authority”。
+
+例如 Steward 产生：
+
+“用户似乎已经不再喜欢 X”
+
+TypeScript 只能生成一个 PersonaMutationProposal。
+
+Rust Kernel 检查：
+
+subject
+evidence refs
+provenance
+expected version
+mutation kind
+conflict
+authority rules
+
+最后才允许 commit。
+
+不能出现：
+
+LLM → SQL
+LLM → memory table
+LLM → persona state
+
+这种路径。
+
+4. TypeScript Host 不应该使用通用 Agent Framework 作为核心
+
+我比较了当前 TypeScript AI 基础设施后，推荐：
+
+使用 Vercel AI SDK Core，但不要把 ToolLoopAgent / 通用 Agent abstraction 当 Nous 的认知架构。
+
+AI SDK 目前已经提供多 provider registry、custom provider、middleware、structured output、tool calling、embedding 等基础能力。
+
+而且最重要的是，它允许调用者直接构造完整 ModelMessage[]，包括 system/user/assistant/tool messages；provider-specific options 甚至可以加在 message 级别，例如缓存控制。
+
+这正好符合我们的 Managed Cognition。
+
+所以：
+
+Use:
+generateText()
+streamText()
+ModelMessage[]
+Output.object(...)
+Provider Registry
+Middleware
+Tool primitives
+
+Do not delegate architecture to:
+ToolLoopAgent
+LangGraph
+generic autonomous-agent runtime
+
+因为 Nous 本身就在研究：
+
+Context Compiler
+Steward
+Focus
+Session
+Projection
+Memory
+Cognitive maintenance
+
+再用一个 Agent Framework 接管循环，会出现双重 orchestration。
+
+AI SDK 应该是 Model I/O abstraction layer，而不是 Nous 的大脑。
+
+5. Managed Cognition 可以落实成真正的 Context Compiler
+
+我现在建议正式定义一个内部：
+
+Context IR
+
+而不是系统内部到处传 messages[]。
+
+核心结构大致是：
+
+ContextPlan
+ ├─ ImmutablePrefix
+ ├─ EpochSnapshot
+ └─ AppendOnlyTail
+
+其中：
+
+ImmutablePrefix
+=
+agent/system core
+tool definitions
+protocol constraints
+consumer invariants
+
+它尽可能稳定。
+
+EpochSnapshot
+=
+consumer-specific persona projection
+relationship projection
+current focus
+active cognition
+working knowledge snapshot
+
+它不是每 turn 改，而是形成一个 context epoch。
+
+最后：
+
+AppendOnlyTail
+=
+user turns
+assistant turns
+tool calls/results
+small cognitive deltas
+
+这是缓存友好的关键。
+
+因此不应该每轮：
+
+重新生成整份 persona
++
+重新排序 memory
++
+重新构建 prompt
++
+重新发送
+
+而是：
+
+stable prefix
+      ↓
+epoch snapshot
+      ↓
+append
+append
+append
+      ↓
+material semantic change
+      ↓
+new epoch
+
+当 Persona、Focus 等变化很小时，可以先追加一个 CognitiveDelta。
+
+当 delta 累积过大、snapshot 明显 stale，或者语义发生重大改变：
+
+seal old epoch
+→ compile new snapshot
+→ start new epoch
+
+如果语义 correctness 要求立即更新，就立即换 epoch；绝不能为了 cache hit 保留错误上下文。
+
+AI SDK 已经允许 provider options 下沉到 message，因此不同 provider 的缓存标记可以由 adapter 实现，而不需要污染 Context IR。
+
+6. Active Cognition 不应成为第二套 Memory
+
+这里我认为前一轮概念还能进一步收敛。
+
+不要做：
+
+Memory
+↓ copy
+Active Cognition DB
+↓ copy
+Session Context
+
+否则立即形成三套真相。
+
+更好的实现是：
+
+Active Cognition
+=
+Authority references
++
+runtime-derived state
++
+small ephemeral annotations
+
+例如：
+
+FocusWorkingSet
+  memory_refs[]
+  resource_refs[]
+  persona_refs[]
+  relation_refs[]
+  goal_refs[]
+
+  runtime_notes[]
+  attention_weights[]
+
+重要事实仍然留在 Authority。
+
+Session 只保存“现在正在用哪些东西”和少量运行态。
+
+恢复 Session 时重新 resolve authority refs。
+
+这样如果 Persona 在另一个 Agent 中发生合法更新：
+
+old Session resumes
+→ resolve refs
+→ detects newer authority version
+→ rebuild context epoch
+
+不会恢复一份过期 Persona 副本。
+
+7. Focus 可以先把多焦点问题直接砍掉
+
+我认为没有必要现在实现“一个 Session 同时有多个 foreground Focus”。
+
+第一版定义：
+
+Session
+  0..1 foreground Focus
+  0..N suspended Focus
+
+切换任务：
+
+Foreground A
+  ↓ checkpoint
+Suspended A
+
+Resume B
+  ↓
+Foreground B
+
+真正并行、互不相关的认知任务，应使用两个 Session。
+
+这既符合 Session-scoped Steward，也避免立即发明复杂的 attention arbitration system。
+
+未来如果实际需求证明“一次推理必须同时维持两个 foreground Focus”，再扩展。
+
+8. Session state 应持久化，但它不是 Authority
+
+这是另一个必须明确的边界。
+
+TypeScript 是 Session semantics 的 owner，但不能让 Session 只存在于 Node heap 中。
+
+否则：
+
+Host restart
+=
+Session lost
+
+所以 Rust Kernel 应增加一个很薄的 runtime state store：
+
+SessionRuntimeSnapshot
+FocusCheckpoint
+ContextEpochMetadata
+StewardGenerationMetadata
+
+但这些必须进入明确独立的 runtime namespace。
+
+语义上：
+
+Runtime persistence != Memory
+Runtime persistence != Authority
+Runtime persistence != reinforcement
+
+而且这里不需要把整个 cognitive schema 搬进 Rust。
+
+Kernel 可以只认识：
+
+subject_id
+session_id
+version
+schema_version
+payload
+created_at
+updated_at
+expires_at
+
+Host 可以将 versioned protobuf payload 存进去。
+
+也就是说：
+
+Rust 负责“可靠保存”，TS 负责“它表示什么”。
+
+这比要求 Rust 理解未来不断变化的 Focus/Steward/Context Compiler 模型干净很多。
+
+9. Steward 也可以进一步去 Agent 化
+
+之前叫 Session-scoped Steward Agent 没错，但实现上我不建议把它做成一个自主循环的“Agent object”。
+
+更准确的实现应该是：
+
+StewardEngine
++
+StewardGeneration
+
+它由这些事件触发：
+
+turn boundary
+focus switch
+context pressure
+explicit query
+maintenance request
+checkpoint
+
+它可以持有长期 model-visible context，因此从模型角度确实像一个长期 Agent。
+
+但从 Nous runtime 看，它只是：
+
+replaceable cognitive worker
+
+它输出：
+
+ActiveStatePatchProposal
+ProjectionSuggestion
+MaintenanceProposal
+CheckpointProposal
+
+而不是直接改变 Authority。
+
+Steward model 挂掉：
+
+Steward unavailable
+       ↓
+deterministic ProjectionPlanner
+       ↓
+Memory / Persona / Focus refs
+       ↓
+templated ContextSegments
+       ↓
+继续运行
+
+这就是实际的 graceful degradation。
+
+10. Cognitive Projection Runtime 应采用两阶段结构
+
+我建议不要让 Memory、Persona、Relationship 各自生成最终 prompt。
+
+应该统一为：
+
+Contributor
+    ↓
+Contribution IR
+    ↓
+Projection Planner
+    ↓
+Projection Renderer
+    ↓
+Context Segment
+
+例如 Memory contributor 返回 memory candidate；Persona contributor 返回 persona facets；Relationship contributor 返回 relationship state。
+
+公共 envelope 包含：
+
+source
+authority_ref
+relevance
+confidence
+freshness
+consumer relevance
+token estimate
+provenance
+
+但 payload 保持 discriminated union，不要把所有东西降格成 string content。
+
+然后 Projection Planner 做：
+
+consumer filtering
+budgeting
+deduplication
+priority resolution
+
+之后才允许可选的模型压缩/融合。
+
+无 LLM：
+
+deterministic render
+
+有 LLM：
+
+selected contributions
+→ projector
+→ structured ProjectionProposal
+→ source/provenance validation
+→ render
+
+这实现了真正的：
+
+LLM-enhanced
+not
+LLM-dependent
+11. Nous Query Language 放在 TS 是正确的
+
+Query Language 本质是 Agent ergonomics，不是 storage primitive。
+
+因此：
+
+NousQL string
+   ↓
+TS parser
+   ↓
+CognitiveQuery AST
+   ↓
+typed kernel query
+
+Kernel 不应该解析诸如：
+
++(foo)
+--QDF=5
+
+这样的用户/Agent 语法。
+
+Kernel 只认识：
+
+BoostClause
+FreshnessPolicy
+RecallPolicy
+PrecisionPolicy
+SubjectScope
+EvidenceConstraint
+...
+
+目前我建议使用成熟 parser toolkit，而不是手写 lexer/parser。
+
+Ohm v17 是稳定版本，grammar 与 semantic actions 分离，而且支持 grammar extension；这很符合未来逐渐扩展 NousQL 的需求。v18 正在做新的 Wasm parser，但截至现在仍是 beta，因此没有必要为了几十行认知查询语法追新。
+
+所以当前推荐：
+
+ohm-js 17
+
+而不是自制 parser。
+
+12. 配置也可以明确实现方式
+
+“先统一可配置，再决定用户是否可配置”可以直接变成三级配置模型：
+
+Bootstrap Config
+    ↓
+Resolved Host Config
+    ↓
+Resolved Component Snapshots
+
+Bootstrap 只允许真正启动必须的东西，例如：
+
+data dir
+kernel executable
+listen policy
+logging
+
+Host Resolver 则处理：
+
+model aliases
+Steward model
+maintenance model
+projection policy
+budgets
+timeouts
+focus policy
+context epoch policy
+maintenance triggers
+
+然后各 owner 接受自己的 typed snapshot：
+
+ModelRuntimeConfig
+ProjectionConfig
+ContextCompilerConfig
+StewardConfig
+KernelPolicyConfig
+...
+
+不要搞一个全局 Config 到处读取。
+
+同时需要：
+
+GetEffectiveConfig()
+
+返回：
+
+effective value
+owner
+source:
+  default / file / env / runtime
+
+秘密字段自动 redact。
+
+第一版甚至不需要 hot reload。
+
+配置改动后 restart 是完全合理的；不要为了“可配置”立即写配置 watcher、dynamic reconciliation、config event bus。
+
+13. 模型路由也不需要再自己写 Provider SDK
+
+Host 应在 AI SDK provider registry 外再包非常薄的一层：
+
+Nous Model Capability Registry
+
+AI SDK 负责：
+
+provider API
+streaming
+tool calls
+structured output
+provider-specific transport
+
+Nous 自己只负责认知语义：
+
+role = steward
+
+requires:
+  long_context
+  structured_output
+
+prefers:
+  low_latency
+  low_cost
+
+配置再写：
+
+steward:
+  primary: gemini-flash
+  fallback:
+    - deepseek-flash
+    - other-model
+
+maintenance:
+  primary: stronger-model
+
+不要现在设计一个复杂的自动 benchmark/scoring/router。
+
+模型选择首先是 operator policy。
+
+AI SDK 自己已经支持集中 provider registry 和 model aliases，所以大量 provider glue 不需要 Nous 重新做。
+
+14. 顶层 Management API 也需要随架构改变
+
+这是本轮架构变化带来的一个必然结果。
+
+未来完整 Management API 已经不可能只存在于 Rust。
+
+因为现在需要管理：
+
+Sessions
+Focus
+Steward
+Models
+Projection
+Context
+Maintenance
+Config
+
+这些全部是 Host-owned。
+
+因此长期结构应该成为：
+
+Public Management / Cognitive API
+            │
+          Host
+            │
+      Kernel private API
+
+Kernel 自己仍保留：
+
+low-level admin API
+health
+diagnostics
+authority operations
+recovery CLI
+
+这样即使 Host 坏掉，也还能修数据库、查 Memory、执行基本检索。
+
+因此此前那个悬而未决的问题，我现在可以给出明确建议：
+
+current Rust apps/nous-wave
+        ↓
+eventually becomes
+nous-kernel
+
+new TypeScript top level
+        ↓
+nous / nous-host
+
+顶层 nous CLI 也应属于 Host，因为最终：
+
+nous session ...
+nous focus ...
+nous query ...
+nous config ...
+nous maintain ...
+
+已经明显跨越 Rust Kernel。
+
+15. Repository 不要因此炸成几十个 package
+
+语言拆分不等于 package 拆分。
+
+我建议最开始只有：
+
+apps/
+  nous-kernel/       Rust
+  nous-host/         TypeScript
+
+proto/
+  nous/wave/kernel/v1/
+  nous/wave/cognition/v1/
+
+packages/
+  protocol-ts/       generated / boundary only
+
+Host 内部先普通目录：
+
+src/
+  session/
+  focus/
+  projection/
+  context/
+  steward/
+  models/
+  query/
+  maintenance/
+  config/
+  api/
+
+而不是马上：
+
+@nous/session
+@nous/focus
+@nous/context
+@nous/steward
+@nous/projection
+...
+
+只有真正出现独立复用/发布边界以后才拆 package。
+
+这点对 Coding Agent 尤其重要，否则很快又会滑向“看起来专业”的 workspace bureaucracy。
+
+16. 当前 TypeScript toolchain 已经没有必要保守
+
+现在 TypeScript 7 已在 2026-07-08 正式发布，不再是 preview；官方报告大型项目通常可以得到约 8–12 倍的完整构建性能提升。
+
+所以新的 Host 可以直接：
+
+TypeScript 7
+ESM
+strict
+ESNext-ish target
+pnpm
+
+Node 则截至今天 2026-09-09，24 仍然是 LTS，26 要到 2026 年 10 月进入 LTS。
+
+架构本身不应绑定这个月的版本，我更建议：
+
+support floor: Node 24 LTS
+development compatibility: Node 24 + 26
+
+十月以后可以直接把主开发线切到 Node 26 LTS。
+
+不需要因为 Node 26 现在还是 Current 就重新设计东西。
+
+17. 最终 degradation ladder 现在也很清楚了
+
+这是我认为新架构是否正确的一个很好的验收标准：
+
+Level A — Managed Cognition
+Kernel
++ Host
++ Steward
++ model-assisted Projection
++ Context Compiler
+
+↓ model unavailable
+
+Level B — Deterministic Assistive Cognition
+Kernel
++ Host
++ deterministic Projection
++ explicit queries
++ Session / Focus
++ Context Compiler
+
+↓ Host unavailable
+
+Level C — Cognitive Kernel
+Authority
++ Memory
++ retrieval
++ provenance
++ serving/index
++ low-level management/query API
+
+不能出现：
+
+Gemini API down
+→ Nous cannot remember anything
+
+也不能出现：
+
+TS Host crash
+→ database cannot be recovered
+
+这正是为什么进程边界比 N-API 更适合 Nous。
+
+我现在认为可以正式锁定的架构决策
+
+本轮之后，我认为以下内容已经不太需要继续保持“模糊候选”状态：
+
+Rust Cognitive Kernel + TypeScript Cognitive Host 应正式成为实现架构。
+Host 是逻辑 runtime/package，可嵌入 Heptalogos；Kernel 是 native sidecar。
+Rust↔TS 默认采用 Protobuf + ConnectRPC 的粗粒度 process boundary。
+Connect/generated types 必须限制在 transport layer。
+不使用 N-API 承载整个 Kernel。
+AI SDK Core 作为 model/provider substrate，不采用通用 Agent framework 接管 Nous cognition。
+Session/Focus/Projection/Context/Steward/NousQL 属于 TS Host。
+Authority、事务、检索、索引、provenance、proposal acceptance 属于 Rust Kernel。
+Session Runtime 可以持久化在 Kernel，但属于 non-authoritative runtime state。
+一个 Session 第一版只有一个 foreground Focus。
+Context Compiler 使用 immutable prefix + epoch snapshot + append-only tail。
+Public Management API 最终由 Host 聚合；Kernel 保留 recovery/admin API。
+LLM maintenance 始终 proposal-first。
+第一版不做 scheduler、config hot reload、自动智能 model router、复杂 multi-focus、event-sourced cognition。
+
+其中我认为最重要的新收敛实际上不是“用了 TypeScript”，而是：
+
+Nous 的领域边界现在终于可以按变化率和可信度来切，而不是按现有 crate 或语言来切。
+
+高可信、强事务、性能敏感的部分向 Kernel 收敛；高变化、模型相关、consumer-specific 的部分向 Host 收敛；二者通过一个明确的认知协议交互。
+
+这套结构已经足够进入下一阶段：下一步不应该再继续宏观发散，而应直接设计 Host↔Kernel Protocol、Session/Focus Runtime schema、Projection IR、Context IR 和第一轮迁移顺序，然后形成新的可执行 Architecture Implementation Spec。
+
+Session Handoff.md
+文件
+
+可以，而且我认为这是更好的设计。按我们现在的剃刀原则，~ 基本已经没有足够的存在理由。
+
+如果规定：
+
+"..." 
+
+在 Query Expression 位置天然就是 semantic text cue，那么：
+
+"Rust ownership mistakes"
+
+就是完整自然语言查询。
+
+@e("Alice") && "graduate school"
+
+表示硬语义条件。
+
+@e("Alice") +("graduate school")
+
+表示 soft preference。
+
+这比：
+
+~"Rust ownership mistakes"
+@e("Alice") && ~"graduate school"
+@e("Alice") +(~"graduate school")
+
+明显更短、更自然，而且少教 LLM 一个没有实际信息量的符号。
+
+关键在于：语法上下文本身已经足够消歧。
+
+例如：
+
+@e("Alice")
+
+这里 "Alice" 位于 @e(...) 参数位置，所以它是 Entity 的 surface name。
+
+$rel(from=@e("Alice"),to=@e("Bob"),kind="trust")
+
+这里 "trust" 是 kind 参数的数据。
+
+而：
+
+"trust"
+
+位于 Query Expression 位置，就是 semantic text query。
+
+不存在解析歧义，因为它们处于不同 grammar production 中。
+
+这样 grammar 可以直接变成：
+
+Primary ::= Universe
+          | Selector
+          | String
+          | QueryConstructor
+          | "(" BoolExpr ")"
+
+其中：
+
+String as Primary
+→ SemanticText
+
+而：
+
+String as Argument
+→ ordinary string argument
+
+解析器完全知道它在哪个位置。
+
+这甚至让 soft preference 也更漂亮：
+
+@e("Alice") +("school")
+
+而不用：
+
+@e("Alice") +(~"school")
+
+两者的信息量完全一样。
+
+于是非常核心的一组语法会变成：
+
+"school"
+
+语义上查询 school。
+
+@e("Alice") && "school"
+
+Alice 且 school 必须相关。
+
+@e("Alice") +("school")
+
+Alice 是主体，school 只是偏好。
+
+@tag("school")
+
+精确 persisted Tag。
+
+这四者现在反而异常清晰：
+
+"school"              semantic cognition
+@e("Alice") && "school"   hard semantic constraint
+@e("Alice") +("school")   soft semantic preference
+@tag("school")        exact topology object
+
+相比 v0.4：
+
+~"school"
+@e("Alice") && ~"school"
+@e("Alice") +(~"school")
+
+~ 确实只是视觉标记，没有承担额外语义。
+
+唯一需要提前考虑的是未来的 exact textual match。
+
+假如以后确实需要：
+
+必须原文出现 "EADDRINUSE"
+
+那就不能再让裸字符串承担 exact 与 semantic 两种含义。
+
+但这不构成保留 ~ 的理由。更符合剃刀的是：
+
+"EADDRINUSE"
+
+默认仍然是 semantic query；
+
+只有明确要求 exact text 时才支付额外语法成本，比如未来：
+
+$exact("EADDRINUSE")
+
+或者：
+
+="EADDRINUSE"
+
+到底选哪个可以等 exact lexical retrieval 真有需求时再决定。
+
+也就是说：
+
+最常用、最自然的语义查询拿最短语法；低频特殊语义承担额外标记。
+
+这比反过来要求所有自然语言都写 ~ 更合理。
+
+还有一个附带好处：对于 LLM 来说，生成 NQL 可以自然退化。
+
+最简单：
+
+"大学期间和 Alice 关系发生变化的事情"
+
+然后逐步结构化：
+
+@e("Alice") && "大学期间关系发生变化"
+
+再加领域：
+
+@e("Alice") $memory && "大学期间关系发生变化"
+
+不过最后这个写法会涉及 attachment 与 Boolean 的结合树，我们需要 canonicalize 成最清楚的：
+
+(@e("Alice") $memory) && "大学期间关系发生变化"
+
+或者如果 $memory 应作用于整个交集：
+
+(@e("Alice") && "大学期间关系发生变化") $memory
+
+而这两者是否等价，必须由 Domain specialization 的正式语义决定。这正说明我们现在应该把精力放在 expression/attachment 的类型关系，而不是给自然语言再加一个 ~。
+
+所以我会把 v0.4 的这一点直接改掉：
+
+~"..."     REMOVE
+
+改成：
+
+"..."      semantic text Query Atom
+
+并同步简化：
+
++(~"...")  → +("...")
+-(~"...")  → -("...")
+
+这次是非常明确的净简化：少一个 token、少一个 grammar construct、少一条教材规则，没有损失现有表达能力。
+
++("school") - 括号也没必要，虽然写了也不算错
+
+对，这还能继续简化。我认为 +/- 应该正式定义成一元 soft-relevance 前缀运算符，而不是“长得像函数的 attachment”。
+
+Canonical 应该改成：
+
++"school"
+-"small talk"
+
++recent
+-incidental
+
++@tag("school")
++@anchor("first-apartment")
+
+而不是：
+
++("school")
+-(incidental)
+
+括号只是普通 grouping，因此下面仍然合法：
+
++("school")
++(recent)
++(@tag("school"))
+
+但 canonical serializer 自动去掉冗余括号：
+
++("school")       → +"school"
++(recent)         → +recent
++(@tag("school")) → +@tag("school")
+
+这样有一个很好的统一逻辑：
+
+"school"                semantic predicate
++"school"               soft positive preference
+-"school"               soft negative preference
+
+@tag("school")          exact Tag predicate/focus
++@tag("school")         softly prefer cognition around that exact Tag
+
+recent                   不能独立作为 query
++recent                  registered soft preference
+
+于是 + 本身真正携带唯一的信息：
+
+把紧邻的 operand 从硬查询语义降为 soft relevance signal。
+
+- 同理：
+
+softly downweight，而非 NOT/exclude。
+
+这比 +(...) 更符合剃刀，因为括号原来没有承担 scope，也没有承担参数列表语义。
+
+语法也会更干净：
+
+SoftPreference ::= ("+" | "-") PreferenceAtom
+
+PreferenceAtom ::= String
+                 | PreferenceKey
+                 | Selector
+                 | "(" PreferenceAtom ")"
+
+而不是：
+
+Weight ::= "+" "(" PreferenceOperand ")"
+         | "-" "(" PreferenceOperand ")"
+
+优先级规定也非常简单：+/- 只吞一个紧邻的 PreferenceAtom，binding 高于 && / ||。
+
+所以：
+
+@e("Alice") +"school" $limit(5)
+
+解析成：
+
+Apply(
+  Entity(Alice),
+  Preference(+ SemanticText("school")),
+  Limit(5)
+)
+
+而：
+
+@e("Alice") && "school"
+
+仍然是：
+
+All(
+  Entity(Alice),
+  SemanticText("school")
+)
+
+二者字面差异也足够明显。
+
+这里还有一个值得顺手修正的地方：以前我把 +/- 归到 “postfix attachment”，其实并不准确。现在更适合把 modifier 分成两种 surface：
+
+postfix directives
+$memory
+$time(...)
+$limit(...)
+
+prefix preference operands
++"..."
+-@tag(...)
++recent
+
+但它们编译以后仍然进入同一个 scoped QueryModifiers.preferences，所以这只是字面语法的自然化，不增加 Runtime 概念。
+
+例如完整查询变得更舒服：
+
+@e("Alice") $memory $time(occurred,within=30d) +recent +"graduate school" $limit(5)
+
+读起来基本就是：
+
+Alice → Memory → 30 天 → 偏新 → 偏研究生院 → 5 条。
+
+我认为这个修改可以直接锁。它同时减少字符、括号和一条特殊语法规则，而且没有损失任何表达能力。
+
+唯一需要继续坚持的是：- 绝不能因为长得像搜索引擎语法就获得 exclude 含义。
+
+-"tool results"
+
+只降权。
+
+真正硬排除仍然必须：
+
+$exclude(source=tool)
+
+这正好保持 hard / soft 的边界。
+
+还有，实体语法id问题解决了吗？查询应当用真名、id？id是SHA还是单词？现在约定设计。
+
+现在可以把这个问题正式锁定。结论是：查询既允许用名字，也允许用 ID，但两者承担不同阶段的职责；模型看到的精确 ID 不用 SHA/UUID，而采用稳定的 typed word LexicalRef。内部存储身份仍然使用机器 ID。
+
+最核心的三层身份模型是：
+
+DisplayName / Alias
+        ↓ 方便发现、首次查询
+LexicalRef
+        ↓ AI / NQL 精确引用
+Authority Identity
+        ↓ 内部存储与 Authority
+
+例如：
+
+Alice
+ent:amber-lotus-cello-river
+UUIDv7 / Host EntityRef
+
+这三者绝不能混成一个东西。
+
+名字查询继续保留，而且应该是最自然的首次查询：
+
+@e("Alice")
+
+这里 "Alice" 不是实体 ID，只是一个 EntityLocator::Name。Binder 会去解析：
+
+@e("Alice")
+        ↓
+唯一 Alice
+        ↓
+ent:amber-lotus-cello-river
+        ↓
+Host canonical EntityRef
+
+如果只有一个 Alice，就直接执行。
+
+如果有两个：
+
+Alice — university friend
+Alice — work contact
+
+则不能猜，返回：
+
+AMBIGUOUS_REFERENCE
+
+以及候选：
+
+ent:amber-lotus-cello-river
+ent:quiet-piano-mint-cloud
+
+这样第二次查询就可以精确写：
+
+@e(ent:amber-lotus-cello-river)
+
+所以不是“名字还是 ID 二选一”，而是：
+
+名字用于 discovery；LexicalRef 用于 exact continuation。
+
+这特别适合 Agent 多轮查询。LLM 没有必要每次先调用一个“查 ID”工具再查询。第一跳直接：
+
+@e("Alice")
+
+即可。
+
+一旦结果里已经有：
+
+ent:amber-lotus-cello-river
+
+后续就应该优先继续用：
+
+@e(ent:amber-lotus-cello-river) $memory
+
+而不是重新退回 "Alice"。
+
+ID 本身我现在建议正式锁成：
+
+<type>:<word>-<word>-<word>-<word>
+
+例如：
+
+ent:amber-lotus-cello-river
+mem:quiet-piano-mint-cloud
+tag:coral-frame-lake-bird
+anchor:mint-river-cello-frame
+art:maple-glass-lotus-field
+obs:quiet-drum-coral-lake
+
+即：
+
+type prefix
++
+4 random words
+
+不是：
+
+550e8400-e29b-41d4-a716-446655440000
+
+也不是：
+
+8fa4c20e9d3a71...
+
+更不是：
+
+alice-school-friend-kind
+
+最后一种尤其危险，因为 ID 不能携带可能变化的认知语义。
+
+例如 Alice 后来不再是 school friend：
+
+ent:alice-school-friend-kind
+
+就会变成错误描述。
+
+所以 body 必须是随机、语义中立的：
+
+amber-lotus-cello-river
+
+这四个词使用冻结的 4096-word vocabulary。
+
+因为：
+
+4096 = 2^12
+
+所以：
+
+4 words = 48 bits
+
+但这里不能错误理解成：
+
+“48 bit 靠概率保证绝对不碰撞”。
+
+实际生成方式是：
+
+CSPRNG
+→ 生成四词 candidate
+→ UNIQUE INSERT
+→ collision 则重新生成
+
+也就是中央 mint + 数据库唯一约束 + retry。
+
+因此随机空间只是候选空间，不是唯一性的最终 Authority。
+
+Nous Wave 这种中心化 Authority 系统没必要为了假设中的“全球离线分布式生成”立刻用六七个单词。
+
+如果未来真的出现：
+
+offline minting
+disconnected multi-writer
+cross-deployment global refs
+
+再增加 word count 或 namespace。
+
+不要现在为不存在的问题支付永久 token 成本。
+
+分隔符也可以锁了：
+
+-
+
+即：
+
+ent:amber-lotus-cello-river
+
+而不是同时支持：
+
+ent:amber_lotus_cello_river
+ent:amber.lotus.cello.river
+ent:amber lotus cello river
+
+Canonical 只允许一种。
+
+词表本身之后可以做 tokenizer benchmark，但不要因此制造多套 LexicalRef syntax。
+
+全部：
+
+lowercase ASCII
+
+不做大小写 alias。
+
+还有一个关键区别：Nous-owned 对象和 Host-owned Entity 不能用同一种 Authority ownership。
+
+对于 Memory、Tag、Anchor 这些 Nous 自己拥有的 Authority：
+
+mem:quiet-piano-mint-cloud
+        ↓
+UUIDv7 MemoryId
+
+也就是说：
+
+LexicalRef
+↔ UUIDv7
+
+一对一稳定映射。
+
+但是 Entity 当前是 Host-owned identity，所以：
+
+ent:amber-lotus-cello-river
+        ↓
+Host Entity binding
+        ↓
+Host canonical EntityRef
+
+而不是 Nous Kernel 再偷偷创造一个新的“真正 EntityId”。
+
+否则只是为了 AI-friendly ID，我们反而篡改了 Authority ownership。
+
+Resource 同理。
+
+因此：
+
+UUIDv7
+
+仍然保留，而且是内部主身份的首选。
+
+但 LLM 正常情况下根本看不到：
+
+0199...
+
+模型看到的是：
+
+mem:quiet-piano-mint-cloud
+
+数据库/Kernel 处理的是：
+
+MemoryId(UUIDv7)
+
+这两个层级解耦。
+
+至于 SHA/BLAKE3，我认为现在也可以明确排除：
+
+SHA/BLAKE3 不作为普通 cognitive object identity。
+
+因为：
+
+identity != content hash
+
+例如一个 Memory：
+
+MemoryId
+
+身份保持不变，但它可以产生 revision。
+
+Tag 也可以 revision。
+
+Anchor 也可以 revision。
+
+所以不能：
+
+content changed
+→ SHA changed
+→ object identity changed
+
+SHA/BLAKE3 更适合：
+
+Artifact content digest
+deduplication
+integrity
+producer signature
+config digest
+immutable payload fingerprint
+
+比如：
+
+ArtifactId = UUIDv7
+ArtifactDigest = BLAKE3(...)
+
+两个都存在，各管一件事。
+
+Query 的 canonical 也因此分成两层。
+
+LLM 写出来：
+
+@e("Alice") $memory
+
+这是 Source Canonical Form。
+
+Binder 后：
+
+@e(ent:amber-lotus-cello-river) $memory
+
+这是 Bound Canonical Form。
+
+真正传给 Kernel：
+
+QueryAtom::EntitySet {
+    participants: [
+        HostEntityRef(...)
+    ]
+}
+
+Kernel 根本不解析：
+
+"Alice"
+
+也不解析：
+
+ent:amber-lotus-cello-river
+
+这些都在 Host binding 阶段完成。
+
+这样 replay 也稳定：
+
+2026:
+Alice display name = "Alice"
+
+2028:
+Alice display name = "Alice Chen"
+
+历史 query trace 仍然绑定：
+
+ent:amber-lotus-cello-river
+
+不会因为改名失效。
+
+还有一个可以顺势简化的地方是 $rel。
+
+之前我们写：
+
+$rel(from=@e("Alice"),to=@e("Bob"),kind="trust")
+
+其实有冗余。
+
+既然 from 和 to 的类型在 $rel signature 中已经明确是 EntityLocator，直接：
+
+$rel(from="Alice",to="Bob",kind="trust")
+
+就够了。
+
+精确形式：
+
+$rel(
+    from=ent:amber-lotus-cello-river,
+    to=ent:quiet-piano-mint-cloud,
+    kind="trust"
+)
+
+canonical 单行：
+
+$rel(from=ent:amber-lotus-cello-river,to=ent:quiet-piano-mint-cloud,kind="trust")
+
+甚至可以混用：
+
+$rel(from="Alice",to=ent:quiet-piano-mint-cloud,kind="trust")
+
+Binder 最终统一解析。
+
+这个规则很重要：
+
+当参数类型已经由函数签名决定时，不要为了重复声明类型再套 selector。
+
+还有一个必须锁的生命周期规则：
+
+LexicalRef NEVER REUSED
+
+Memory 被 purge 以后：
+
+mem:quiet-piano-mint-cloud
+→ TOMBSTONED
+
+而不是以后分给另一个 Memory。
+
+否则历史：
+
+logs
+conversation
+query replay
+external reference
+
+都会发生灾难性的 identity rebinding。
+
+所以 lexical address registry 需要保留 tombstone。
+
+最终现在可以把实体查询约定浓缩成：
+
+@e("Alice")
+
+首次/方便查询，按名字精确绑定。
+
+@e(ent:amber-lotus-cello-river)
+
+精确实体查询。
+
+@e("Alice",ent:quiet-piano-mint-cloud)
+
+允许混合输入。
+
+@e("Alice","Bob")
+
+joint participant set，参数无方向。
+
+@e(ent:aaa...,ent:bbb...)
+
+Bound Canonical Form。
+
+模型结果一般返回：
+
+{
+  "ref": "ent:amber-lotus-cello-river",
+  "name": "Alice"
+}
+
+不正常暴露 raw UUID。
+
+我也把这部分单独写成了已经锁定的 Identity/Addressing Contract：
+
+NousQL Identity & Addressing Contract v0.5
+
+我认为这部分现在可以视为基本收敛：Name → LexicalRef → Authority Identity 三层，4×4096 随机词 LexicalRef，内部 Nous Authority UUIDv7，Host-owned Entity 保持 Host ownership，SHA/BLAKE3 只负责内容身份/完整性而不是 cognitive object identity。 
+
+NousQL_Identity_and_Addressing_Contract_v0.5.md
+文档

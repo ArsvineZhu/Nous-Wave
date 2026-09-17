@@ -8,7 +8,7 @@ remote_access = false
 mode = "managed"
 url = ""
 max_connections = 8
-name = "nous_wave_20260908"
+name = "nous_wave_20260917"
 install_dir = "./data/postgres-install"
 data_dir = "./data/postgres"
 
@@ -24,10 +24,3 @@ lexical_enabled = true
 dense_enabled = true
 topology_enabled = true
 
-[providers.embedding]
-enabled = false
-kind = "none"
-
-[providers.document_extraction]
-enabled = false
-kind = "none"

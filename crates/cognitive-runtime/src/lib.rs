@@ -1,6 +1,8 @@
 //! Model-independent Session continuity, consumer context and query orchestration.
 
+mod checkpoints;
 mod query;
+pub use checkpoints::*;
 mod resources;
 mod sessions;
 mod types;
@@ -15,19 +17,13 @@ pub use types::*;
 use chrono::{DateTime, Utc};
 use nous_authority_store::AuthorityStore;
 use nous_core::*;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
-};
+use std::collections::HashSet;
 use uuid::Uuid;
-
-type ResourceResolverMap = Arc<RwLock<HashMap<String, Arc<dyn ResourceResolver>>>>;
 
 #[derive(Clone)]
 pub struct CognitiveRuntimeService {
     pub store: AuthorityStore,
     pub resident_limit: usize,
-    resource_resolvers: ResourceResolverMap,
 }
 
 impl CognitiveRuntimeService {
@@ -38,20 +34,7 @@ impl CognitiveRuntimeService {
         Ok(Self {
             store,
             resident_limit,
-            resource_resolvers: Arc::new(RwLock::new(HashMap::new())),
         })
-    }
-
-    pub fn with_resource_resolver(
-        self,
-        key: impl Into<String>,
-        resolver: Arc<dyn ResourceResolver>,
-    ) -> Self {
-        self.resource_resolvers
-            .write()
-            .expect("resource resolver composition lock")
-            .insert(key.into(), resolver);
-        self
     }
 
     pub async fn require_subject(&self, subject: SubjectId) -> Result<()> {

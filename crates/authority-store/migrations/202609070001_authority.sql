@@ -318,7 +318,6 @@ CREATE TABLE resources (
     modalities jsonb NOT NULL DEFAULT '[]',
     freshness_policy jsonb NOT NULL DEFAULT '{}',
     access_cost_class text NOT NULL,
-    resolver_key text NOT NULL,
     readiness text NOT NULL CHECK (readiness IN ('ready','degraded','unavailable')),
     updated_at timestamptz NOT NULL,
     PRIMARY KEY(subject_id, resource_ref)

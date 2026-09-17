@@ -112,8 +112,8 @@ impl MemoryService {
         let mut tx = self.store.begin().await?;
         sqlx::query("INSERT INTO anchors(anchor_id,subject_id,current_revision_id,created_at,status) VALUES($1,$2,$3,$4,'active')")
             .bind(anchor_id.0).bind(subject.0).bind(revision_id).bind(now).execute(&mut *tx).await.map_err(db)?;
-        sqlx::query("INSERT INTO anchor_revisions(anchor_revision_id,anchor_id,revision_no,label,description,origin,created_at) VALUES($1,$2,1,$3,$4,$5,$6)")
-            .bind(revision_id).bind(anchor_id.0).bind(input.label).bind(input.description).bind(input.origin).bind(now).execute(&mut *tx).await.map_err(db)?;
+        sqlx::query("INSERT INTO anchor_revisions(anchor_revision_id,anchor_id,revision_no,label,description,origin,created_at,confirmed) VALUES($1,$2,1,$3,$4,$5,$6,$7)")
+            .bind(revision_id).bind(anchor_id.0).bind(input.label).bind(input.description).bind(input.origin).bind(now).bind(input.confirmed).execute(&mut *tx).await.map_err(db)?;
         for support in input.supports {
             let (kind, value) = reference_parts(&support.reference);
             sqlx::query("INSERT INTO anchor_support(anchor_revision_id,support_ref_kind,support_ref,support_role,provenance) VALUES($1,$2,$3,$4,'{}')")

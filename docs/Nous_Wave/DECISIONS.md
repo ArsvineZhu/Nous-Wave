@@ -35,7 +35,7 @@ Nous Wave is an independent general-purpose Subject cognition system.
 Seed is retained with provenance/history and remains distinct from evolved Persona/Self cognition.
 
 ### D4 — MicroSystem architecture — LOCKED
-Semantic owner + typed operations + explicit dependencies + readiness. Modular monolith/static composition.
+Semantic owner + typed operations + explicit dependencies + readiness. Static MicroSystem composition remains; the authorized Architecture Rebase adopts a TypeScript Host supervising a Rust Kernel process.
 
 ### D5 — Required core vs optional cognition — LOCKED
 Subject Core and Cognitive Runtime are required. Memory is optional and enabled in the reference profile.
@@ -54,7 +54,8 @@ Origin/source, semantic class, epistemic class and representation/media must not
 
 ### D11 — tool/system output is evidence, not automatic truth — LOCKED
 
-### D12 — Rust runtime/core implementation — LOCKED for current product direction
+### D12 — TypeScript Cognitive Host + Rust Cognitive Kernel — LOCKED for current implementation wave
+The 2026-09-16 Architecture Rebase authorization supersedes the Rust-only physical direction. Rust retains Authority, retrieval, serving and reliable persistence; TypeScript owns public Core/Client orchestration, Focus/Projection/Context, model invocation and NousQL. Execution details and pending acceptance are in [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md). This decision describes the target; migration is in progress.
 
 ### D13 — PostgreSQL 18.x structured Authority — DEFAULT
 Earlier documentation called this LOCKED. Reclassify physical store selection as DEFAULT because it is implementation architecture, not cognitive theory.

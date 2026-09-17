@@ -102,49 +102,61 @@ impl CognitiveRuntimeService {
         });
         result.results.truncate(query.result_need.limit);
         if !result.degradation.is_empty() {
-            result.status = QueryStatus::Degraded;
+            result.status = if result
+                .degradation
+                .iter()
+                .any(|d| d.code == "required_external_authority_unresolved")
+            {
+                QueryStatus::Partial
+            } else {
+                QueryStatus::Degraded
+            };
         }
-        if query.diagnostics != DiagnosticsRequest::None {
-            let diagnostics = result.diagnostics.get_or_insert(QueryDiagnostics {
-                candidate_counts: BTreeMap::new(),
-                lane_status: BTreeMap::new(),
-                wave_observability: None,
-                trace: None,
-            });
-            diagnostics.lane_status.insert(
-                "effort".into(),
-                format!("{:?}", query.effort).to_lowercase(),
-            );
-            diagnostics.lane_status.insert(
-                "cue_sensing_plan".into(),
-                if plan.sense_cues {
-                    "enabled"
-                } else {
-                    "skipped"
-                }
-                .into(),
-            );
-            diagnostics.lane_status.insert(
-                "topology_plan".into(),
-                if plan.expand_topology {
-                    "enabled"
-                } else {
-                    "skipped"
-                }
-                .into(),
-            );
-            diagnostics
-                .candidate_counts
-                .insert("planned_candidate_bound".into(), plan.candidate_limit);
-            diagnostics.lane_status.insert(
-                "resource_plan".into(),
-                format!(
-                    "limit={},synopsis_preferred={}",
-                    plan.resource_limit, plan.prefer_resource_synopsis
-                ),
-            );
-        }
+        explain_plan(&mut result, &query, &plan);
         Ok(result)
+    }
+}
+
+fn explain_plan(result: &mut CognitiveQueryResult, query: &CognitiveQuery, plan: &QueryPlan) {
+    if query.diagnostics != DiagnosticsRequest::None {
+        let diagnostics = result.diagnostics.get_or_insert(QueryDiagnostics {
+            candidate_counts: BTreeMap::new(),
+            lane_status: BTreeMap::new(),
+            wave_observability: None,
+            trace: None,
+        });
+        diagnostics.lane_status.insert(
+            "effort".into(),
+            format!("{:?}", query.effort).to_lowercase(),
+        );
+        diagnostics.lane_status.insert(
+            "cue_sensing_plan".into(),
+            if plan.sense_cues {
+                "enabled"
+            } else {
+                "skipped"
+            }
+            .into(),
+        );
+        diagnostics.lane_status.insert(
+            "topology_plan".into(),
+            if plan.expand_topology {
+                "enabled"
+            } else {
+                "skipped"
+            }
+            .into(),
+        );
+        diagnostics
+            .candidate_counts
+            .insert("planned_candidate_bound".into(), plan.candidate_limit);
+        diagnostics.lane_status.insert(
+            "resource_plan".into(),
+            format!(
+                "limit={},synopsis_preferred={}",
+                plan.resource_limit, plan.prefer_resource_synopsis
+            ),
+        );
     }
 }
 

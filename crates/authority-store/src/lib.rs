@@ -1,7 +1,9 @@
 //! PostgreSQL Authority repositories and migration ownership.
+mod identity;
 mod projection_input;
 mod projections;
 mod references;
+pub use identity::{IdentityBinding, lexical_prefix, validate_lexical};
 mod serving;
 mod topology_input;
 pub use projection_input::{TextProjectionInput, TextProjectionSource};

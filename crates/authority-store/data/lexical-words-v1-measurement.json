@@ -1,0 +1,20 @@
+{
+  "source": "https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt",
+  "source_sha256": "addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e",
+  "wordlist_sha256": "bf4fbb30b74df0abe5c71b16ea7216bb9deb98dd0be4e1eddfc350aecee6d2df",
+  "words": 4096,
+  "candidate_bits": 48,
+  "sample_seed": 20260917,
+  "samples": 10000,
+  "tokenizer_version": "0.14.0",
+  "encodings": {
+    "cl100k_base": {
+      "mean": 9.973,
+      "max": 13
+    },
+    "o200k_base": {
+      "mean": 9.8887,
+      "max": 13
+    }
+  }
+}

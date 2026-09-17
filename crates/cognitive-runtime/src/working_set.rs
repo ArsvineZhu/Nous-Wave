@@ -50,6 +50,7 @@ pub struct ConsumerWorkingSet {
 }
 
 pub struct ContextSource {
+    pub source_revision: Option<MemoryRevisionId>,
     pub media_type: String,
     pub text: Option<String>,
     pub authority: AuthorityClass,
@@ -157,6 +158,7 @@ impl CognitiveRuntimeService {
             result.budget_used.items += 1;
             result.refs.push(reference.clone());
             result.contributions.push(ContextContribution {
+                source_revision: source.source_revision,
                 reference: reference.clone(),
                 semantic_role: "context_evidence".into(),
                 text,

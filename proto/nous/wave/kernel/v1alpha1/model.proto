@@ -1,0 +1,32 @@
+syntax = "proto3";
+package nous.wave.kernel.v1alpha1;
+import "nous/wave/v1alpha1/types.proto";
+import "nous/wave/v1alpha1/management.proto";
+import "google/protobuf/empty.proto";
+message EmbeddingConfig {
+  string space_hash = 1;
+  string producer_hash = 2;
+  string model = 3;
+  uint32 dimension = 4;
+}
+message QueryEmbedding { string text = 1; string space_hash = 2; string producer_hash = 3; repeated float vector = 4; }
+message KernelQueryRequest { nous.wave.v1alpha1.QueryRequest query = 1; repeated QueryEmbedding embeddings = 2; }
+message EmbeddingNeedsRequest { string subject_id = 1; uint32 limit = 2; }
+message EmbeddingNeed { nous.wave.v1alpha1.CognitiveRef reference = 1; string text = 2; string digest = 3; }
+message EmbeddingNeedsResponse { EmbeddingConfig config = 1; repeated EmbeddingNeed needs = 2; }
+message CommitEmbeddingRequest { string subject_id = 1; nous.wave.v1alpha1.CognitiveRef reference = 2; QueryEmbedding material = 3; }
+message CommitInterpretationRequest {
+  string subject_id = 1;
+  string source_region_id = 2;
+  string text = 3;
+  string model = 4;
+  string model_revision = 5;
+  string implementation = 6;
+  string kind = 7;
+}
+service ModelMaterialService {
+  rpc GetEmbeddingConfig(google.protobuf.Empty) returns (EmbeddingConfig);
+  rpc ListEmbeddingNeeds(EmbeddingNeedsRequest) returns (EmbeddingNeedsResponse);
+  rpc CommitEmbedding(CommitEmbeddingRequest) returns (google.protobuf.Empty);
+  rpc CommitInterpretation(CommitInterpretationRequest) returns (nous.wave.v1alpha1.DerivedRepresentation);
+}

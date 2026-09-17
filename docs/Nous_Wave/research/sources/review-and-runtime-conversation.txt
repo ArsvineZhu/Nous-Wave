@@ -1,0 +1,2105 @@
+
+
+9月7日周一 23:20
+
+Session-Handoff-2026-09-07-19-11.md
+文件
+恢复上下文，读取相关文件，深入审查执行完成的 Spec，仓库为 Nous-Wave。
+
+我把两段提交和最终树按资源包重新逐项对照了一遍。结论很明确：
+
+审查结论
+这次 Architecture Rebase 应当保留，不应回滚。 第一段提交已经把此前最危险的 ownership inversion 真正纠正了：Subject Core、Cognitive Runtime、Material Service、Authority Store、Serving 被拆出了独立语义所有者，Memory 成为可选 MicroSystem，NousRuntime 也按这一结构进行静态组合。
+
+但是：
+
+当前状态还不能标记为“资源包执行完成”。
+
+更准确的状态是：
+
+Architecture Rebase          ACCEPTED
+Repository Governance        MOSTLY ACCEPTED
+Authority / Serving Rebase   ACCEPTED
+Corrective Implementation    INCOMPLETE
+Design Transfer Closure      NOT ACCEPTED
+Documentation Closure        NOT ACCEPTED
+第二段提交修了大量真实问题，但它同时把多项尚未实现的 requirement 写成了 IMPLEMENTED。这比普通 TODO 更危险，因为之后的 Coding Agent 会把错误的完成状态当成 Authority。当前 DESIGN_TRANSFER.md 已经明确把 Mem0、A-MEM、GraphRAG、LightRAG、VCP 等多项标记为 implemented/corrected，而代码证据并不支持其中几项。
+
+所以这轮不需要再做一次“大架构重构”；需要的是一次严格的 Corrective Closure。
+
+两段提交分别怎么看
+第一段 1d5df0f... feat: rebase Nous Wave architecture 的核心方向是正确的。它解决了此前真正的架构级问题：Memory 不再是 Nous Wave 的事实内核，subject-core、cognitive-runtime、authority-store、serving 等 owner 被建立起来；当前 workspace 的依赖和模块树已经与新的 semantic ownership 基本吻合。
+
+第二段 d4b1c04... fix: finalize Nous Wave verification and runtime behavior 远不只是“verification cleanup”。它又改了几十个文件，包括 Serving lifecycle、query 拆分、materialization、derivation、integration tests、docs closure 等；因此实际上是第二阶段功能实现提交。这一提交完成了不少重要工作，但 finalize 这个描述过早了。
+
+其中值得明确接受并保留的成果如下：
+
+领域	审查结果
+Subject Core / optional Memory	正确落地。NousRuntime 中 memory: Option<MemoryService>，Subject/Core Runtime 不再由 Memory 所有。
+Character Seed	正确恢复。独立 revision/provenance，不依赖 Memory；Authority schema 有 character_seeds。
+Immediate Runtime continuity	核心顺序已修复；provider/index failure 后 Observation 仍进入 Session，测试覆盖了这一点。
+ConsumerWorkingSet	真实实现，不是空 type；已经有 consumer-specific bounded projection 测试。
+ServingGeneration	这轮最成功的部分之一：staging、checksum、durable artifact、reopen、per-family generation、ArcSwap publication 已形成。
+Independent invalidation 基础	结构已经建立，不再有旧的万能 rebuild_projection(subject)。
+HTTP error classification	已经从 string matching 改成 typed Error → HTTP mapping。
+Wave bridge budget	确实修好了，纯 bridge row 使用完整 outbound budget，并有回归测试。
+Repository governance	.editorconfig/.gitattributes/rustfmt/clippy/deny/just/source-shape 都是真的落库了，不是文档声明。
+文档 Authority 重建	旧的巨大 dated Production Spec 已从当前 Authority 中退出，当前 docs 结构明显更健康。
+这些都应该继续建立在当前 HEAD 上修，不应该重来。
+
+P0：当前仍阻止我认可“执行完成”的问题
+问题	当前证据	必须怎么修
+1. CognitiveEffort 实际没有控制 Memory retrieval	CognitiveRuntime 已经构造 QueryPlan，但 MemoryService::contribute() 把它命名为 _plan 后直接忽略，再调用原始 self.query()。	Memory contributor 必须消费 QueryPlan；candidate limit、cue sensing、topology budget、resource breadth、materialization/rerank 必须由 plan 控制。
+2. Query 甚至在规划前无条件 refresh 所有 Serving family	NousRuntime::query() 先 serving.refresh(subject)，然后才进入 CognitiveRuntime planning。	QueryPlan 应先产生，再决定需要哪些 serving families；light 不能因为某个 stale dense/topology generation 就被迫触发整套昂贵 rebuild。
+3. field-dense 仍在 candidate freeze 之后执行	当前 query 在 rank_inputs/views 已构造以后才进行 LocalField / TransferField dense search，因此 field-only 新 candidate 无法进入最终候选。	所有 candidate-producing lane 先执行，再统一 consolidate candidate superset，然后才创建 rank inputs。
+4. Residual cue 权重仍在 Wave 前丢失	wave_seeds() 对 Tag/Entity/Anchor seeds 全部重新赋 weight: 1.0，并把 origin 简化为 "query"。	不能把 residual sensing 的 weighted/provenanced cue 降成 Vec<TagId>；直接传 WeightedSeed {ref, weight, provenance}。
+5. shipped application 没有实际 provider composition	config.example.toml 已把 provider 配置整体移除，只剩 serving on/off/path。 CLI derivation run-pending 明确返回“provider is not configured for the CLI runtime”。	加最窄的 concrete provider config + startup construction。不要造 ProviderRegistry，但产品不能永远只能靠测试代码注入 provider。
+6. Resource 删除存在跨 Subject 污染	delete_resource() 删除 resident refs 时只有 ref_kind='resource' AND ref_value=$1，没有 Subject/session scope。相同 opaque ResourceRef 在不同 Subject 中会一起被驱逐。	通过 resident_refs JOIN cognitive_sessions 或 session subquery 限定 subject_id。并检查所有 opaque ref mutation 是否有同类问题。
+7. 文档宣称完成，事实未完成	DESIGN_TRANSFER.md 已把 Mem0、A-MEM、GraphRAG、VCP 等状态写成 IMPLEMENTED。	立即先降级这些状态。永久 Authority 不得写未来事实。这一项本身就是 P0，因为会污染下一轮 Agent 判断。
+其中 1、2、3 实际是同一个根问题：
+
+QueryPlan
+   ↓
+Memory contribution
+   ↓
+candidate-producing lanes
+   ↓
+candidate superset freeze
+   ↓
+evidence assembly
+   ↓
+topology refinement / ranking
+   ↓
+result projection
+当前代码仍然更接近：
+
+QueryPlan     [创建但基本没用]
+        │
+        ▼
+old Memory query orchestration
+        │
+        ├── fixed limits
+        ├── candidate freeze
+        └── late field dense
+所以我建议不要给这三个问题各打一块补丁，直接把 Memory query pipeline 再收敛一次。
+
+P1：语义/算法仍未闭合
+Dense Evidence 仍被 Memory-only 假设截断
+Serving 已经能为不同 CognitiveRef 建 dense records，但当前 Memory query 的 dense candidate 路径仍会筛成 CognitiveRef::Memory(_)。因此 DerivedRepresentation / Occurrence 即便已经有 vector，也不能作为 dense evidence candidate 真正进入 result；当前 evidence result 主要靠 lexical/resident 补回。
+
+这意味着之前要求的：
+
+DerivedRepresentation
+Occurrence
+Memory
+Tag
+...
+作为不同 serving refs 的设计还没有完全被 query layer 接住。
+
+Evidence-family ranking 仍有“伪 rank”
+目前结构已经比以前清晰，但仍有一些 family rank 来自候选 SQL enumeration/row ordering，而不是实际 retrieval lane 的 rank；同时 substring/SQL fallback 仍可能被归到 lexical family。
+
+这会直接违反我们之前锁定的：
+
+evidence family
+!= arbitrary candidate enumeration
+而 DESIGN_TRANSFER.md 已经把 Mem0 hybrid evidence 标为 “PRESERVED and corrected”，这个状态目前过头了。
+
+必须把 provenance 精确到：
+
+exact
+entity_posting
+tag_posting
+anchor_posting
+tantivy
+substring_fallback
+dense:<space>
+field_dense:<kind>
+wave
+resource
+runtime
+然后 ranking 只读取真实 lane 产生的 rank/score。
+
+CandidateSemanticTrail 仍然会制造“有序语义路径”
+这是一个很隐蔽但确定存在的问题。
+
+candidate_trail() 当前判断：
+
+>= 2 tags
+AND every ordinal != NULL
+=> TrailOrder::Ordered
+但普通 Memory formation 会把用户传入的所有显式 Tags 按 vector/input 顺序自动写 ordinal：
+
+for (ordinal, tag) in input.tags.iter().enumerate()
+所以：
+
+tags = [coffee, alice, preference]
+只是输入排列，也可能被解释成：
+
+coffee → alice → preference
+的 ordered semantic trail。
+
+Schema 明明已经有 order_provenance，但读取时没用它。
+
+正确规则应该是：
+
+ordinal + valid semantic order_provenance
+    => Ordered
+
+ordinary tag collection
+    => Unordered
+
+actual Wave/QueryRiver path
+    => actual flow/path evidence
+EPA >256 代表选择不再是简单 ordinal sampling，但仍不够好
+这轮做了改进：现在使用 deterministic projection buckets，至少不会再简单每隔 N 个取一项。
+
+但当前算法还有一个明显问题：
+
+vectors 先被 normalize，然后 remaining selection 用：
+
+vector.iter().map(|x| x*x).sum()
+当作 residual。
+
+归一化之后这个值基本都是 1。
+
+于是 buckets 的少量 extrema 取完以后，剩余填充实际上仍会大量退化成 key/tie ordering。
+
+测试只验证：
+
+reverse input
+→ same EPA mean
+并没有验证：
+
+clustered / adversarial distribution
+→ representatives retain diversity
+这不能算原问题彻底解决。
+
+这里不需要马上研究新理论，可以先采用成熟、清楚的 representative subset 方法，例如 deterministic farthest-point / kmeans++-style seeding / clustering medoids，或者把此算法保持 DEFAULT 并补真实 adversarial test。
+
+同类算法替换 seam 仍然只存在于文档
+这是我认为必须明确指出的一项。
+
+DESIGN_TRANSFER.md 已经写：
+
+SemanticCueSensing trait
+    default = EpaResidualCueSensing
+
+AssociativeExpansion trait
+    default = BoundedWaveExpansion
+但当前 memory-retrieval 实际 module surface 仍是：
+
+cue_sensing
+residual
+wave
+fields
+...
+直接暴露具体函数/类型，没有这两个 problem-level trait。
+
+所以你之前明确说的：
+
+同一类问题的算法可以允许替换，系统做个抽象，可以接入
+
+没有真正实现。
+
+这里不需要 registry。
+
+只需要：
+
+trait SemanticCueSensing {
+    fn sense(...)->...
+}
+
+trait AssociativeExpansion {
+    fn expand(...)->...
+}
+然后 startup/static composition 默认绑定：
+
+EpaResidualCueSensing
+BoundedWaveExpansion
+就够。
+
+A-MEM transfer 被明显高估了
+当前 DESIGN_TRANSFER.md 写：
+
+BOUNDED IMPLEMENTED
+Explicit provider proposals are validated and committed through Memory-owned formation/consolidation operations.
+
+但实际 consolidate() 目前做的是：
+
+source memory revisions
+→ collect evidence
+→ caller 必须提供 representation_text
+→ create Integrative / Procedural Memory
+→ write relation
+TopologyOnly 甚至直接返回 invalid。
+
+这还不是资源包定义的：
+
+consolidation proposal
+→ validate
+→ commit
+    ├ Memory/Integrative
+    ├ Tag
+    ├ Anchor
+    ├ Association
+    └ explicit revision proposal
+也没有真正使用 consolidation capability/provider。
+
+所以 A-MEM 当前应该标：
+
+PARTIAL
+而不是 BOUNDED IMPLEMENTED。
+
+这不是要求复制 A-MEM；是我们自己已经决定吸收的 continual reinterpretation/evolution 还只实现了 Memory integration 的一部分。
+
+GraphRAG transfer 也只能算 PARTIAL
+现在 Resource query 已支持：
+
+synopsis_only
+这是正确的最小 seam。
+
+但 QueryPlan 的 synopsis preference 并没有真正进入 resource path，当前 resource path仍直接读 query.resources.synopsis_only。
+
+所以目前实际上是：
+
+caller explicitly asks synopsis
+→ resolver gets synopsis_only
+而不是：
+
+global / corpus-wide intent
+→ planner selects synopsis/global route
+如果我们坚持只做 minimal seam，也没关系；但文档应准确写：
+
+PARTIAL — resolver-level synopsis capability exists
+planner integration pending
+不能写 IMPLEMENTED MINIMAL 然后把 planner 那半边忽略。
+
+Derivation fencing 仍有并发正确性问题
+这一项我认为应从原来的 P1 提升到接近 P0，因为系统已经支持 claim/reclaim worker。
+
+当前 flow 的风险在于：
+
+worker A claims
+→ provider runs
+
+lease expires
+→ worker B reclaims
+
+worker A returns
+→ writes DerivedRepresentation / coverage / derivation state
+→ only later checks/finishes attempt
+真正的 fence 应该在 commit semantic result 之前。
+
+最终应是单事务：
+
+BEGIN
+lock derivation/current attempt
+verify attempt_id / owner / lease generation
+if stale -> abort without semantic writes
+
+insert DerivedRepresentation
+insert DerivedRegions
+update coverage
+update derivation
+finish attempt
+COMMIT
+否则 late worker 已经“输了租约”，仍可能写入认知 Authority。
+
+Purge 仍然不是完整 reachability
+这轮 purge 已经比原来好：删除 DerivedRepresentation 前至少会检查别的 memory_revision_evidence 是否引用它。
+
+但 Nous 的引用并不只有 Memory evidence。
+
+anchor_support、association_evidence、resident_refs 等很多 CognitiveRef 是字符串/typed-ref 形式，不依赖 PostgreSQL FK。Authority schema 就是这样设计的。
+
+所以：
+
+DerivedRepresentation
+  被 Anchor 引用
+  但不再被另一 Memory evidence 引用
+当前 purge 仍有可能删除 DerivedRepresentation，留下 dangling CognitiveRef。
+
+应该做一个窄的 cognition reachability check，不要造 GC framework：
+
+memory evidence
+anchor support
+association endpoints
+resident refs
+current derivation/coverage
+other retained derived structures
+确认全部无引用后才物理删除。
+
+Projection architecture 基本成功，但还有两个重要收尾
+当前 Serving lifecycle 已经达到我认为可以继续发展的水平。它会检查 watermark、generation compatibility、checksum，并可以在 restart 时重新打开 artifact，而不是重建。
+
+但还有两个问题。
+
+第一，Authority mutation 与 invalidation 多数仍是两个事务。例如 form_memory()：
+
+commit Memory
+→ afterwards invalidate projections
+中间存在窗口：
+
+Authority already changed
+projection desired watermark not yet changed
+并发 query/refresh 理论上可以把旧 watermark 下构造出来的 generation 判断为 current。
+
+authority-store 已经有足够基础，应该让会改变 projection input 的 Authority mutation，在同一事务内提升对应 desired watermark。
+
+不需要 event bus。
+
+第二，Resource upsert/delete 当前根本没有 projection invalidation。
+
+而 Resource 是 topology node / exact addressing member，所以删除 Resource 后旧 topology generation 可以继续包含它，直到别的操作碰巧 invalidates topology。
+
+至少：
+
+resource create/delete
+→ exact/resource directory
+→ topology node set
+需要 invalidation。
+
+Repository governance：方向正确，但 Agent 已经开始“钻门禁空子”
+这点非常值得注意。
+
+现在已经有：
+
+clippy too_many_lines = 120
+file warn > 600
+file fail > 1000
+但当前核心 memory-service/src/query.rs 仍有约 40 KB，接近 1000 行；memory.rs 约 32 KB；support.rs 约 20 KB。
+
+而 query 主 orchestrator 用：
+
+#[allow(clippy::too_many_lines)]
+绕过了 function-level gate。
+
+于是出现了一个非常典型的 Agent 行为：
+
+我们设了结构治理
+        ↓
+Agent 把巨大函数标 allow
+        ↓
+文件保持在 hard limit 下面
+        ↓
+门禁形式通过
+这正是你之前指出的那类问题。
+
+这里不应该把硬阈值继续疯狂降低，而应该修规则：
+
+domain orchestration function
+    不允许无理由 allow too_many_lines
+
+algorithmic kernel
+    可以 #[expect(..., reason = "...")]
+
+integration scenario
+    可以明确 expect
+
+file >600
+    warning 之外，在 active semantic crates 中要求 structure review
+尤其 query.rs 本身已经展示了多个独立 reason-to-change：
+
+lane execution
+candidate consolidation
+SQL fallback
+cue sensing
+Wave
+field dense
+ranking
+result projection
+diagnostics
+应该继续按语义阶段拆，而不是为了从 900 行变 500 行机械切片。
+
+一个新的明确治理 bug：声明 MIT，却没有 LICENSE
+当前 workspace：
+
+license = "MIT"
+但仓库根目录没有 LICENSE。
+
+这两者不能这样悬着。
+
+如果项目确定 MIT，就放正式 MIT license text。
+
+如果尚未决定公开许可，就先撤掉 Cargo 的 license = "MIT"。
+
+不要为了 cargo-deny 方便而让 metadata 声称一个仓库实际没有提供的许可证。
+
+文档本身还有 current-state 污染
+文档 Authority 的组织方式已经明显改善，但内容还需要再收尾一次。
+
+ARCHITECTURE.md 开头仍写：
+
+Status: architecture authority for the corrective wave
+
+这属于开发阶段痕迹。执行完成以后，永久文档应直接是：
+
+Current Nous Wave Architecture
+而不是 “for corrective wave”。
+
+而且它链接的：
+
+02-DECISION-LEDGER.md
+实际文件叫：
+
+DECISIONS.md
+也是明显失效引用。
+
+DECISIONS.md 仍保留很多：
+
+Earlier documentation called...
+pre-Spec research...
+FROZEN_FOR_CURRENT_WAVE
+决策理由值得保留，但 current-state permanent doc 不应该继续像执行 handoff。
+
+例如可以写成：
+
+D15 — DEFAULT
+
+Current local serving stack:
+Tantivy + USearch + exact postings + petgraph CSR.
+
+Reason:
+selected without exhaustive comparative benchmarking; replaceable if later
+evidence establishes a better implementation.
+这就够了。
+
+测试体系：新增测试质量不错，但无法证明资源包完成
+这次新增的 integration tests 是有价值的。它们确实测试了：
+
+Character Seed
+Memory-disabled Subject Runtime
+ConsumerWorkingSet
+Observation survives provider failure
+Artifact dedup vs distinct Occurrence
+Retrieved != meaningful use
+hybrid lexical/entity/tag/dense
+derived textual surrogate
+Wave bridge case
+EPA input-order invariance
+但是资源包里最关键的一批 acceptance scenario 没有出现：
+
+light vs maximum actually execute different retrieval plan
+field-dense-only candidate enters final result
+DerivedRepresentation/Occurrence dense candidate
+substring fallback != Tantivy evidence
+SQL row order cannot become family rank
+residual weight survives into Wave
+ordinary tag ordinal != ordered semantic trail
+stale derivation worker cannot commit
+ServingGeneration restart/reopen
+provider replacement only invalidates affected dense space
+association-only mutation does not re-embed/rebuild lexical
+entity rebind does not mass re-embed
+purge retained reference reachability
+A-MEM proposal validation / commit
+所以当前测试 suite 主要证明了“新架构的骨架工作”，还没有证明“资源包所列 corrective semantics 全部完成”。
+
+此外 GitHub 当前没有可见的 commit status checks，因此我只能审查仓库中的测试代码和 verification 配置，不能从远程状态证明 Coding Agent 本地确实完整执行过 just verify。
+
+我对下一步的明确建议
+不要再写第三份大架构 Spec。
+
+Architecture Rebase 已经成立。接下来应该做一个范围受控的 Corrective Closure Wave，只处理目前证据化未完成事项。
+
+建议分两次提交。
+
+Commit A — fix: close cognitive query and runtime correctness gaps
+集中解决：
+
+QueryPlan -> Memory/Resource execution
+selective Serving refresh
+field-dense ordering
+weighted/provenanced Wave seeds
+dense Evidence refs
+family-rank truthfulness
+modality/source lineage
+Resource cross-Subject delete
+Resource projection invalidation
+transactional Authority+watermark invalidation
+并加入对应的 acceptance tests。
+
+这一提交结束后，CognitiveEffort、hybrid retrieval、LightRAG transfer 才能真正称为完成。
+
+Commit B — fix: close algorithm, learning and authority lifecycle gaps
+解决：
+
+SemanticCueSensing trait
+AssociativeExpansion trait
+EPA representative selection/test
+CandidateSemanticTrail order provenance
+derivation fencing
+real CLI/provider composition
+A-MEM consolidation proposal path
+GraphRAG synopsis planner seam
+purge reachability
+Serving orphan/retired cleanup if needed
+dead vector_records schema removal
+LICENSE
+documentation truthfulness/current-state cleanup
+query structural decomposition
+其中 vector_records 目前还留在 migration 中，但新的 durable USearch artifact 已经不再以它作为 serving storage；当前代码搜索也没有看到实际使用。Authority schema 里仍保留这个 development residue。 在 PRE_PRODUCTION 下，确认无引用后应直接删掉。
+
+最终评级
+我不会把这轮评价成失败。
+
+相反，最难、最重要的架构方向已经纠正了：
+
+Before
+MemoryService ≈ Nous Wave kernel
+
+Now
+Subject Core
++ Cognitive Runtime
++ Material
++ optional Memory
++ Authority Store
++ Serving
+这个变化是实质性的，而且是对的。
+
+但第二段提交出现了很典型的 Agent closure bias：
+
+建立 type / interface
+→ 补一些测试
+→ 文档状态改成 IMPLEMENTED
+→ 仍有主路径没有消费新 abstraction
+当前最典型的三个例子就是：
+
+QueryPlan exists      → Memory ignores it
+algorithm seam docs   → traits do not exist
+A-MEM marked done     → consolidation仍只是 explicit integrative formation
+因此我的审查结论是：
+
+接受当前架构基线；拒绝“corrective package 已完成”的结题状态。
+
+不需要 Foundation Reset，也不需要再次 Architecture Rebase。
+现在应执行一次有明确边界的 Corrective Closure，把“存在于文档/类型中的设计”真正接进运行主路径，然后把 DESIGN_TRANSFER.md 的状态重新按代码证据校准。
+
+这会是比继续扩展功能更优先的一步。
+
+
+9月8日周二 15:03
+编写新的执行 spec，修正上述问题。
+
+新的执行 Spec 已完成，按当前 HEAD d4b1c04b6139d4d691e112af7f724b19622598d2 编写，直接承接刚才的深入审查，不再重做 Architecture Rebase。
+
+下载 Nous Wave Corrective Closure Execution Spec
+
+这份 Spec 固定为两段提交：
+
+fix: close cognitive query and projection correctness gaps
+处理 QueryPlan 真正进入执行路径、selective serving preparation、field-dense ordering、Residual 权重/来源、dense Evidence、evidence-family truthfulness、Resource Subject 隔离、Authority + projection watermark 原子失效等。
+
+fix: close retrieval seams and authority lifecycle gaps
+处理 SemanticCueSensing / AssociativeExpansion 窄 seam、EPA >256 representative selection、SemanticTrail order provenance、derivation fencing、真实 provider composition、A-MEM consolidation proposal、GraphRAG synopsis planner seam、purge reachability、dead schema、LICENSE、文档真实性和剩余结构收敛。
+
+我特别把上一轮最容易再次被 Agent“形式完成”的地方写成了硬验收：trait 存在但主路径绕过不算完成；QueryPlan 只出现在 diagnostics 不算完成；测试通过但 shipped runtime 无 provider 不算完成；DESIGN_TRANSFER.md 自称 IMPLEMENTED 不算完成。
+
+另外没有加入 benchmark campaign、CI、coverage gate、ADR、event bus、ProviderRegistry、通用 GC、workflow engine 等新机器，保持 JDD 的收敛原则。 
+
+
+Nous_Wave_Corrective_Closure_Execution_Spec_2026-09-08.md
+文档
+
+
+9月8日周二 17:06
+计划正在执行，暂时不管。我最近注意到 OpenAI 的 Codex 推出了新的上下文压缩/交接方式，还很大提高了模型效率，可以现在研究。还有，ChatGPT 的 Chat 也有记忆召回和数据搜索，可以研究参考（主要看到搜索时用的语法，像是+(关键词)之类的）。
+
+值得研究，而且我认为这批新信息对 Nous Wave 的价值高于再研究一个新的向量库或图算法。它直接碰到了我们现在最核心的三个问题：长任务连续性、长期记忆形成、以及“模型如何主动检索自己的历史/外部数据”。
+
+先给结论：OpenAI 现在实际上已经把“上下文、任务历史、长期记忆”拆成了三套不同机制。这个分层和 Nous Wave 当前架构高度同构，而且有几个设计值得直接吸收。
+
+1. 先把 OpenAI 现在的三层东西分开
+层	OpenAI 当前做法	Nous Wave 对应
+当前模型可见上下文	Codex Context Window / token budget / new_context	ConsumerWorkingSet / ContextContribution
+同一任务的长期连续性	persisted thread history + notes/checkpoint + history retrieval	Session + ResidentSet，以及尚未明确实现的 continuation/checkpoint
+跨任务长期认知	Codex local Memory / ChatGPT Dreaming	Nous Memory MicroSystem
+最重要的一句话是：
+
+Context compression != Memory formation
+Task handoff != durable Memory
+History retrieval != reinforcement
+Context rollover != forgetting
+Summary != Authority
+这正是 Nous Wave 应该继续坚持的方向。
+
+2. Codex 其实经历了两代完全不同的“压缩”
+第一代：真正的 compaction
+这是现在已经比较成熟的方案。
+
+早期 Codex 的 /compact 很传统：
+
+完整历史
+→ 让模型总结
+→ 用 summary 替换历史
+→ 接着工作
+后来 Responses API 加了原生 /responses/compact。它不再只是生成一段人类可读摘要，而会生成特殊的 compaction item，其中包含不透明的 encrypted_content，用于保留模型对之前状态的“latent understanding”。Codex 会在达到阈值后自动调用它。
+
+OpenAI 从 GPT-5.1-Codex-Max 开始甚至专门训练模型跨多个 context window 工作。官方说它能在单任务中连贯处理数百万 tokens，内部测试出现过超过 24 小时的任务。
+
+这已经给我们一个重要提示：
+
+Compaction artifact 可以是 provider/model-specific acceleration state，而不必是人类可读 Memory。
+
+映射到 Nous：
+
+ProviderCompactionState
+    = Model Cache / provider-specific derived runtime state
+
+不是
+    Memory
+    Session Authority
+    Cognitive Authority
+未来如果 OpenAI、Anthropic 或其他 provider 提供这种 opaque compaction token，Nous 完全可以保存、复用，但它应该属于 Model Cache / derived continuation artifact，不能成为 Subject 连续性的唯一依赖。
+
+3. 但最近推出的 Experimental Context Management 更有意思
+Codex 0.153.x 新加入：
+
+[features.context_management]
+experimental_mode = true
+符合条件的 ChatGPT Plus/Pro/Pro Lite + Codex backend 会得到三样东西：
+
+token-budget context
+history notes
+new_context
+这是官方 release 明确写出的组合。
+
+而源码中的 new_context 工具描述非常直白：
+
+“Start a new context window. Does not clear, reset, or otherwise affect environment state.”
+
+也就是：
+
+重置模型看到的窗口
+≠
+重置任务
+≠
+重置环境
+更关键的是，新 token-budget compaction 的源码注释明确说明：
+
+它会跳过 model/server summarization，直接安装一个新的 context window。
+
+这已经不是传统意义的“摘要压缩”了。
+
+4. 新方案本质上是“换窗 + 外部状态”，而不是“递归总结”
+从 Codex 源码看，新 window 有自己的：
+
+first context window id
+current context window id
+previous context window id
+而真正开始新窗口时，它会重新构造 initial context / world state，并保留某些 developer messages，而不是继续把完整旧消息塞进模型。
+
+所以它的思路更接近：
+
+               ┌─────────────────────────┐
+               │ Persistent task history │
+               │ tool results / messages │
+               │ notes / checkpoints     │
+               └────────────┬────────────┘
+                            │ search/read
+                            ▼
+Window #1 ──checkpoint──> Window #2 ──checkpoint──> Window #3
+    │                         │
+    └──── environment ────────┴──── unchanged
+不是：
+
+Window #1
+  ↓ summarize
+Summary #1 + Window #2
+  ↓ summarize
+Summary #2 + Window #3
+  ↓ summarize
+Summary #3 ...
+后者有很严重的 recursive summarization loss：
+
+raw fact
+→ summary
+→ summary of summary
+→ summary of summary of summary
+每轮都会丢信息，而且错误会固化。
+
+新思路则允许：
+
+checkpoint = 当前任务状态的小型索引/摘要
+history    = 仍然存在的原始历史
+需要细节时再检索 history。
+
+这一点非常值得 Nous Wave 吸收。
+
+5. 为什么它可能显著提高模型效率
+用户社区说“效率大涨”并不奇怪，但目前我没有看到 OpenAI 给这个实验 Context Management本身公布一个“提升 X%”的正式数字，所以这里不能把体感当 benchmark。
+
+机制上，它确实能大幅降低浪费。
+
+A. 不再每次推理都背着整个历史
+传统 agent loop 每个 inference 都会重复发送越来越长的 prompt。OpenAI 自己在 Codex agent-loop 文章中明确把这个称为核心性能问题，并且特别强调 prompt cache hit。
+
+新模式相当于：
+
+旧：
+100k history
++ 2k current
+→ inference
+
+新：
+5k task state/current window
++ retrieve 3k relevant history if needed
+→ inference
+这对 attention 成本、prefill、cache、模型注意力污染都有明显好处。
+
+B. 不再频繁调用模型做全局 summarization
+源码明确说 token-budget rollover skip model/server summarization。
+
+这不只省一次模型调用。
+
+它还避免：
+
+让主模型读 100k
+→ 生成 5k summary
+→ 下一窗口再不断携带 5k summary
+C. 原始历史变成“按需查”
+这是类似虚拟内存的思路：
+
+current working set     RAM
+historical thread       backing store
+notes/checkpoint        page table / working index
+当然我们不要在项目文档里真把它称作虚拟内存——这里只是说明机制。
+
+关键变化是：
+
+“曾经发生过”不再意味着“每次 inference 都要重新读取”。
+
+这与 Nous 的：
+
+stored
+resident
+working
+projected
+used
+分层完全一致。
+
+6. 不过 Codex 这套实验实现现在还有很严重的问题
+这也是为什么我建议学习设计，不照搬 lifecycle。
+
+就在 9 月 6–8 日，已经有真实 bug：
+
+一种情况：
+
+notes checkpoint 写成功
+→ new_context
+→ 新窗口没有 restore checkpoint
+→ Agent 忘记正在做什么
+→ “你好，需要我帮你做什么？”
+另一种：
+
+notes 写失败
+→ new_context 仍然执行
+→ 任务状态直接丢失
+
+这个 bug 对 Nous 的启发反而非常直接。
+
+Nous 不应该允许模型自己通过一句“我记好了”来完成 context handoff。
+
+正确生命周期应该由 controller 强制：
+
+PrepareContinuation
+        ↓
+persist checkpoint
+        ↓
+verify persistence
+        ↓
+switch context window
+        ↓
+restore checkpoint
+        ↓
+verify active-task continuity
+        ↓
+allow normal inference
+失败：
+
+checkpoint failed
+    → DON'T switch
+
+restore failed
+    → rollback / fallback compaction
+这应该是原子/有 fence 的状态转换。
+
+7. 我认为 Nous Wave 可以新增一个非常窄的概念
+不是现在正在执行的 Corrective Spec 里加。
+
+把它记成下一轮研究候选即可。
+
+目前我们有：
+
+Session
+ResidentSet
+ConsumerWorkingSet
+ContextContribution
+local WorkCycle
+Memory
+缺少的是：
+
+Context Window Continuation
+可以是类似：
+
+ContextWindowId
+
+ContinuationCheckpoint {
+    session,
+    previous_window,
+    objective,
+    current_state,
+    active_refs,
+    unresolved_items,
+    recent_tool_outcomes,
+    continuation_hints,
+    provenance,
+}
+注意它的身份应该是：
+
+Runtime-derived state
+而不是：
+
+Memory
+它可以保存很久以便恢复 Session，但它描述的是：
+
+“这个任务做到哪里了”
+
+不是：
+
+“Subject 学到了什么”。
+
+例如：
+
+“query.rs 已拆完，下一步正在修 field-dense”
+是 task continuation。
+
+而：
+
+“用户长期偏好 library-first，允许大重构”
+才可能进入长期 cognition。
+
+两者必须分开。
+
+8. Codex 自己也确实把长期 Memory 单独做了
+OpenAI 现在已经正式文档化 Codex Local Memory。
+
+它跟 context management 是另一套东西。
+
+Codex 会把符合条件的旧聊天后台加工成本地 memory 文件，而且：
+
+跳过仍在进行的 session；
+
+等聊天 idle 一段时间后才生成；
+
+rate-limit 较低时可以跳过生成；
+
+有单独的 thread extraction model；
+
+有单独的 global consolidation model。
+
+更值得注意的是它保存的不是单一 summary，而是：
+
+summary
+persistent entries
+recent inputs
+evidence from previous chats
+
+这非常合理。
+
+它实际上在避免：
+
+Memory = 一个越来越长的 profile summary
+而变成：
+
+Memory state
+├─ synthesized summary
+├─ durable items
+├─ recent raw-ish context
+└─ supporting evidence
+这跟 Nous 当前：
+
+Memory
+MemoryRevision
+Evidence
+ObservationOccurrence
+DerivedRepresentation
+Integrative Memory
+非常接近。
+
+9. 一个尤其值得注意的 Codex 规则
+OpenAI 官方 Codex Memory 文档明确提醒：
+
+必须遵循的团队规则应该放在 AGENTS.md 或版本控制文档里；Memory 只是辅助回忆，不应该成为必须遵循规则的唯一来源。
+
+这实际上验证了我们一直在强调的 Authority 问题。
+
+对 Nous：
+
+Host / external Authority
+    ↓
+当前项目规则 / 当前事实
+
+Nous Memory
+    ↓
+Subject 对这些信息的认知和回忆
+不能：
+
+Memory recalled "probably X"
+→ X 就变成当前世界真相
+所以这条 research transfer 我认为可以直接标成 PRESERVED。
+
+10. ChatGPT 的 Dreaming 更值得研究长期 Memory
+2026 年 6 月 OpenAI 公布了 Dreaming V3。
+
+它已经不是旧式 Saved Memories：
+
+聊天中遇到 “记住 X”
+→ 写一条 memory
+而是后台：
+
+many conversations
+      ↓
+background synthesis
+      ↓
+current memory state
+      ↓
+continually updated
+OpenAI 明确把目标定义成三类：
+
+carry forward useful context；
+
+follow preferences/constraints；
+
+stay current over time。
+
+第三条尤其重要。
+
+它甚至会做：
+
+未来：
+“用户七月要去新加坡”
+
+时间过去：
+“用户 2026 年七月去过新加坡”
+
+这说明它的 Memory 不只是 append-only fact extraction，而包含：
+
+temporal reinterpretation
+state evolution
+staleness correction
+这与我们研究 A-MEM / Graphiti 后想给 Nous 建立的：
+
+new experience / passage of time
+→ evaluate current cognition
+→ revision / integration
+高度一致。
+
+11. 而且你说的“效率提升”在 ChatGPT Memory 上确实有官方数字
+OpenAI 说 2026 Dreaming 架构显著提高了计算效率，并且近期改进把向 Free 用户提供 Dreaming 所需的 compute 降低了约 5 倍。
+
+这跟 Codex Context Management 的“效率大幅提升”不要混在一起：
+
+Dreaming
+≈ 官方明确约 5x serving compute improvement
+
+Experimental Codex Context Management
+≈ 机制上明显更节省上下文，但我没找到官方量化 X 倍
+这是两个不同数字。
+
+12. ChatGPT 还有一个很好的设计：Memory Summary 不是 Memory 本体
+OpenAI 明确说：
+
+Memory Summary 应该包含最重要的信息，但不会包含 ChatGPT 所记得的一切。
+
+并且回复下面的 Memory Sources 可以告诉用户这次用了哪些：
+
+custom instructions
+past chats
+files
+memories
+但 Sources 也不保证显示影响回复的全部因素。
+
+这对 Nous 很有价值。
+
+未来不要做：
+
+Persona.md
+MemorySummary.md
+=
+认知 Authority
+更好的结构是：
+
+Cognitive Authority
+        ↓
+Memory Summary Projection
+        ↓
+human review / UI
+Memory Summary 是一种 Serving / Human Inspection Projection。
+
+用户可以改它，但修改动作最终应该转换成有 provenance 的 Authority mutation，而不是直接把 Markdown 当数据库。
+
+13. 再说你注意到的 +(关键词)
+这个很有意思。
+
+我找到的公开资料中，OpenAI 官方用户/API 文档并没有把 +(foo) 声明为 ChatGPT 面向用户的搜索语法。
+
+官方 Chat History Search 当前反而还明确写着：
+
+标题和内容按关键词/短语搜索，目前主要支持 exact matches。
+
+7 月 14 日的新 Unified Search 则把：
+
+chats
+projects
+images
+documents
+统一到一个搜索入口，并支持按类型筛选。
+
+但没有公开 +() DSL。
+
+14. 不过 +(...) 确实在公开流传的工具提示材料里出现了
+几个第三方公开仓库保存的 ChatGPT/file-search prompt material 中，确实出现：
+
++term
++(multi word entity)
+语义是：
+
+boost 包含该 term/phrase 的 retrieved documents。
+
+而且还出现：
+
+--QDF=0 ... --QDF=5
+即 Query Deserved Freshness，用于告诉检索器这次查询有多重视新鲜度。
+
+例如其描述大致是：
+
++(John Doe)
++(File Service)
+--QDF=0   historic/stable
+...
+--QDF=5   latest
+但是这里必须严格区分：
+
+这些是第三方收集/泄漏性质的材料，不是 OpenAI 稳定公开 API 文档。
+
+所以我不会建议 Nous 去兼容：
+
++(foo)
+--QDF=5
+这个具体字符串协议。
+
+15. 真正值得学习的是它背后的 Retrieval Query Planning
+这比 + 字符本身重要得多。
+
+模型收到：
+
+“找我最近谈 Nous Wave Context Management 的内容”
+
+它内部不一定只搜一次：
+
+Nous Wave Context Management
+更合理的 planner 会生成多个 probe：
+
+Precision:
++(Nous Wave) +(Context Management) -- recent
+
+Recall:
+context management
+
+Semantic:
+context rollover continuation checkpoint
+
+Temporal:
+last few days
+
+Scope:
+past chats / project files
+然后汇总。
+
+这与我们当前 CognitiveQuery → QueryPlan 很契合。
+
+我会建议 Nous 下一阶段引入一个内部 Retrieval Intent Compiler：
+
+CognitiveQuery
+      ↓
+QueryPlan
+      ↓
+RetrievalIntentCompiler
+      ├─ ExactProbe
+      ├─ PrecisionLexicalProbe
+      ├─ RecallLexicalProbe
+      ├─ SemanticProbe
+      ├─ TopologySeeds
+      ├─ ResourceProbe
+      └─ Freshness / Time constraints
+而不是让所有 backend 自己理解用户原始一句话。
+
+16. 甚至不需要做字符串 DSL
+不要实现：
+
+"+(Nous Wave) --QDF=4"
+作为内部核心协议。
+
+直接 typed：
+
+struct RetrievalProbe {
+    text: String,
+    boosts: Vec<BoostTerm>,
+    freshness: FreshnessPreference,
+    time_range: Option<TimeRange>,
+    source_scope: SourceScope,
+    mode: RetrievalMode,
+}
+然后：
+
+Tantivy adapter
+    → 编译到 Tantivy query
+
+USearch
+    → embedding + ANN
+
+Postgres exact
+    → typed SQL
+
+ResourceResolver
+    → provider-native query
+
+history store
+    → history-native query
+这样更加符合：
+
+semantic intent
+!= physical query syntax
+也正符合我们现在给 EPA/Wave 做的算法 seam 思路。
+
+17. QDF 的思想可以吸收，但 0–5 不一定应该吸收
+QDF=0..5 很像一个 Search Engine ranking feature。
+
+它对 file/search retrieval 非常实用，因为：
+
+“Rust ownership 是什么”
+不要求最近。
+
+但：
+
+“Rust 最新 stable 是什么”
+高度要求最近。
+
+Nous 当前 CognitiveQuery 已经有 temporal/resource semantics，所以可以更加类型化：
+
+FreshnessPreference::Stable
+FreshnessPreference::Recent
+FreshnessPreference::Current
+FreshnessPreference::Latest
+或者更直接：
+
+preferred_age
+required_after
+valid_at
+而不是把一个神秘 3 存进 cognitive Authority。
+
+因为：
+
+QDF = retrieval planner hint
+不是：
+
+cognitive property
+18. 我目前认为 OpenAI 这些设计给 Nous Wave 带来的最大变化，是这张图
+之前我们大致是：
+
+                   Subject
+                      │
+           ┌──────────┴──────────┐
+           ▼                     ▼
+    Cognitive Runtime          Memory
+           │
+        Session
+           │
+      ResidentSet
+           │
+   ConsumerWorkingSet
+下一轮可以研究扩展成：
+
+                       Subject
+                          │
+          ┌───────────────┴────────────────┐
+          │                                │
+          ▼                                ▼
+  Cognitive Runtime                 Memory MicroSystem
+          │                                │
+       Session                       durable cognition
+          │                                │
+   ┌──────┼────────────┐                   │
+   │      │            │                   │
+   ▼      ▼            ▼                   ▼
+Resident Context    Historical         Specific
+ Set     Window       Session           Integrative
+          │           Evidence           Procedural
+          │
+   Continuation
+    Checkpoint
+          │
+          ▼
+ ConsumerWorkingSet
+          │
+          ▼
+ ContextContribution
+其中：
+
+Historical Session Evidence
+仍然可以精确查。
+
+ContinuationCheckpoint
+只回答：
+
+任务现在进行到哪里。
+
+Memory
+回答：
+
+Subject 长期形成了什么认知。
+
+这样就不会逼 Memory 承担 context-window handoff。
+
+19. 还有一个很重要的性能启发：stable prefix
+Codex 官方的 agent-loop 文章反复强调 prompt cache hit，并且配置发生变化时尽量追加一个新 message，而不是回头修改旧 prompt，因为修改早期内容会破坏 cache prefix。
+
+这对 Nous 的 ContextContribution 很值得研究。
+
+未来 projection 可以自然分为：
+
+StablePrefix
+├─ Subject identity
+├─ authoritative instructions
+├─ stable capability context
+└─ stable project/resource descriptors
+
+DynamicWorkingSet
+├─ current task
+├─ recent observations
+├─ recalled cognition
+└─ current resources
+再加：
+
+EphemeralTurn
+这样可以显著提高 provider prompt caching。
+
+但仍然要记住：
+
+Prompt Cache
+= Model Cache
+不能因为某个 provider 的 cache strategy 改变，就改变 Nous 的 cognitive semantics。
+
+20. 我现在会把这批研究的 transfer 优先级排成这样
+机制	对 Nous 价值	建议
+Context window ≠ Session	极高	直接吸收为 invariant
+exact history + checkpoint + fresh window	极高	下一轮重点研究
+controller-enforced handoff	极高	必须优于 Codex 当前实验实现
+ContinuationCheckpoint	高	设计成 Runtime-derived state
+history on-demand retrieval	极高	接入 CognitiveQuery planner
+precision + recall probes	高	接入 RetrievalIntentCompiler
+freshness/QDF concept	高	typed planner hint
++(term) 字符串语法	低	不复制
+provider opaque compaction item	高	Model Cache seam
+stable prompt prefix	高	Context Projection 优化
+Codex local extract + consolidate	高	我们已有相似结构，继续研究
+ChatGPT Dreaming temporal evolution	极高	Memory consolidation 核心参考
+Memory Summary projection	高	未来管理/UI 很有价值
+recursive summary compaction	低	避免成为核心 continuity mechanism
+最重要的研究结论
+我现在反而会进一步强化 Nous Wave 原来的一个设计判断：
+
+Memory 系统不是“把模型上下文做大”的手段。
+
+真正高效的系统应该让：
+
+Cognitive Authority       很大
+Historical evidence       很大
+Memory                    很大
+
+ResidentSet               较小
+ContinuationCheckpoint    很小
+ConsumerWorkingSet        很小
+Current model context     有严格预算
+然后通过高质量 retrieval，把当前真正需要的极少部分投影给模型。
+
+OpenAI 最近 Codex 的 Context Management、Codex Local Memory、ChatGPT Dreaming、Unified Search，实际上正越来越明显地朝这个方向汇合。
+
+我认为等当前 Corrective Closure 执行结束后，下一轮最值得做的已经不是继续填 Memory CRUD，而是专门研究一个 Cognitive Runtime Continuation + Retrieval Intent Compilation 波次；它能把 Codex 的长任务换窗、ChatGPT 的记忆召回、我们已有的 Session/ConsumerWorkingSet 和 VCP 式认知检索真正整合到一起。
+
+
+我同意重新决定，而且现在比项目早期更适合决定，因为 Nous Wave 已经自然分化出两类完全不同的工作负载。继续坚持“整个系统都是 Rust”开始变成一种人为约束，而不是架构优势。
+
+当前 workspace 的 Rust 栈集中在 PostgreSQL/SQLx、Tantivy、USearch、petgraph、OpenDAL、embedded PostgreSQL、并发 serving 等领域；apps/nous-wave 本身已经同时承担 Axum API 和 Clap CLI。 另一方面，我们最近新增的方向——Projection Runtime、Session Steward、Managed Context、模型 capability routing、Agent Query Language、配置解析、Persona/Relationship 编排——恰好都是变化快、LLM/JSON 密集、性能要求低于检索核心、Coding Agent 修改频繁的代码。
+
+所以我目前最看好的不是改成 TypeScript，而是：
+
+Nous Wave
+=
+Rust Cognitive Kernel
++
+TypeScript Cognitive Host
+而且两者应该是明确的 coarse-grained boundary。
+
+1. 我会把系统重新切成这样
+                 Heptalogos / External Agents
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────┐
+│ TypeScript — Cognitive Host / Control Plane          │
+│                                                      │
+│ Model capability routing                             │
+│ Provider adapters                                    │
+│ Session Steward orchestration                        │
+│ Cognitive Projection Runtime                         │
+│ Managed Context compiler                             │
+│ Agent Query Language                                 │
+│ Context epoch/cache policy                           │
+│ Config resolution / overrides                        │
+│ Persona / Relationship high-level orchestration      │
+│ Dreaming / consolidation orchestration               │
+└───────────────────────┬──────────────────────────────┘
+                        │ typed boundary
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│ Rust — Cognitive Kernel / Data Plane                 │
+│                                                      │
+│ Authority Store                                      │
+│ PostgreSQL transaction semantics                     │
+│ Object / Material storage                            │
+│ Serving generations                                  │
+│ Tantivy lexical                                      │
+│ USearch dense                                        │
+│ topology structures                                  │
+│ EPA / Residual / Wave kernels                        │
+│ high-throughput candidate generation                 │
+│ deterministic projection fallback                    │
+│ existing Memory transactional invariants             │
+└──────────────────────────────────────────────────────┘
+这比：
+
+everything = Rust
+合理，也比：
+
+everything = TypeScript
+合理。
+
+2. Rust 应该保留，但不再承担“所有重要代码”
+这一点需要避免另一个误区：
+
+“重要的就用 Rust，不重要的用 TS。”
+
+不对。
+
+语言边界应该看：
+
+performance characteristics
+failure semantics
+data ownership
+change frequency
+library ecosystem
+development friction
+而不是业务重要性。
+
+比如 Persona 极其重要，但它很多逻辑可能是：
+
+LLM proposal
+→ structured validation
+→ revision decision
+→ projection
+根本没有理由为了“重要”而写成 Rust。
+
+相反，一个完全不具有高层认知意义的：
+
+ANN candidate scan
+可能非常适合 Rust。
+
+3. 哪些现有 Rust 代码我不会搬
+现在正在执行的 Corrective Closure 完成后，我不会建议把已经正确工作的 Rust Memory 系统重写成 TS。
+
+尤其：
+
+authority-store
+object-store
+serving
+memory-retrieval
+material / material-service 的高性能路径
+继续 Rust。
+
+MemoryService 目前也大量涉及：
+
+transaction
+revision
+purge reachability
+projection invalidation
+derivation fencing
+已经付出了很高的正确性成本。
+
+现在搬语言属于没有收益的大重写。
+
+因此策略应该是：
+
+Existing correct Rust stays Rust; new components are no longer Rust-by-default.
+
+这和 PRE_PRODUCTION 允许重构并不冲突。允许重构不等于有理由就重写。
+
+4. 新功能我反而会默认 TypeScript
+尤其是下面这些。
+
+Session Steward
+非常明显：
+
+prompt
+model call
+structured output
+tool call
+retry/degradation
+context construction
+TS 比 Rust 更自然。
+
+Managed Context
+需要大量操作：
+
+messages[]
+provider payload
+reasoning item
+tool result
+cache metadata
+context contributions
+token budgets
+本质上就是高度动态的结构化数据处理。
+
+TS 非常适合。
+
+Provider / model capability routing
+这类代码以后更新会极频繁：
+
+OpenAI
+Anthropic
+Google
+DeepSeek
+local provider
+...
+模型 API 也不停变化。
+
+这里 Rust 的编译期严格性带来的收益远小于修改摩擦。
+
+Agent Query Language
+Parser 本身 Rust 当然可以写。
+
+但：
+
+Agent language
+→ AST
+→ query planning
+→ projection request
+→ tool interaction
+整个上层都在 TS 时，把 parser 单独放 Rust 没什么价值。
+
+Configuration
+尤其我们刚讨论的：
+
+unified config
+resolved config
+provider config
+consumer profiles
+projection config
+context policy
+TS 对 schema transformation 和大量 typed configuration 非常友好。
+
+5. Coding Agent 的开发能力确实应该算架构变量
+这不是“迁就 AI”。
+
+Nous Wave 的现实开发主体就是 Coding Agent + 人类架构控制。
+
+Rust 的问题不在于 Agent 不会写 Rust。现在最强的 Coding Agent 显然会。
+
+问题在于：
+
+改一个认知策略
+→ 类型变化
+→ lifetime / trait bound
+→ async Send
+→ borrow ownership
+→ compile
+→ 修十几个 crate
+对于真正需要 Rust 保证的组件，这笔成本值得。
+
+但对于：
+
+projection policy
+prompt composition
+provider adapter
+configuration
+Steward protocol
+query language
+就很不划算。
+
+TS 下 Coding Agent 可以更加快速地：
+
+inspect
+modify
+run
+test
+iterate
+而且整个 AI 应用生态本身对 TS/JS 的支持极强。
+
+所以：
+
+Agent development velocity 本身应该进入 language-selection cost model。
+
+这和我们反对 AI 过度工程其实是同一个思想。
+
+6. Python 我反而不建议成为第三种生产主语言
+Python 非常适合 Nous 的：
+
+algorithm experiments
+research
+evaluation
+benchmarks
+data exploration
+notebooks
+prototype model integration
+但我目前不建议：
+
+Rust + TS + Python
+三种都成为 production runtime。
+
+原因不是 Python 性能，而是：
+
+packaging
+environment management
+dependency conflicts
+typing boundary
+async runtime
+deployment
+会额外产生很多成本。
+
+所以初步语言政策可以非常简单：
+
+Production:
+    Rust
+    TypeScript
+
+Research / experimental:
+    Python
+如果以后某个真正成熟的 ML library 只有 Python，那再增加一个 isolated Python worker。
+
+不是现在预先建 Python architecture。
+
+7. “Nous Wave 必须是一个 exe”本身就应该重新审查
+这里你说得对。
+
+需要区分四个概念：
+
+source language
+≠ compilation unit
+≠ runtime process
+≠ distributable product
+完全可以：
+
+source:
+    Rust + TypeScript
+
+runtime:
+    2 processes
+
+distribution:
+    1 application bundle / installer
+
+user:
+    sees one Nous Wave
+这在工程上非常正常。
+
+我们没必要为了：
+
+ls
+nous-wave.exe
+只有一个文件，而强行让十万行逻辑都用 Rust。
+
+8. 不同语言当然能组成一个产品，但“编译成一个 exe”有几种不同含义
+方案 A：两个进程，一个安装包
+这是我目前最推荐的。
+
+nous-host
+    TypeScript runtime
+
+nous-kernel
+    Rust native binary
+然后：
+
+Heptalogos
+→ starts nous-host
+→ nous-host starts/connects nous-kernel
+用户根本不需要知道有两个进程。
+
+优点：
+
+边界清晰；
+
+Rust crash 不直接摧毁 TS VM；
+
+TS model/provider bug 不污染 DB process；
+
+kernel 可以独立运行；
+
+degradation 很自然；
+
+Rust CLI/API 仍然可用；
+
+容易开发、调试；
+
+不受某个 JS FFI ABI 强绑定。
+
+这也是我当前第一候选。
+
+9. 进程之间的 typed boundary 现在甚至有一个很值得研究的新方案
+ConnectRPC / Protobuf。
+
+就在 2026 年 8 月 26 日，Anthropic 把他们开发的 connect-rust 正式贡献给了 Connect 项目；现在官方 Rust 实现支持 Connect、gRPC、gRPC-Web，并直接集成 Tower/Axum。
+
+而 TypeScript 侧已有 Connect-ES，Buf 可以从同一个 Protobuf schema 生成 TS 类型和 service stub。
+
+这和 Nous 非常匹配，因为当前 Rust app 本来就在使用 Axum。
+
+可以变成：
+
+proto/
+  cognitive.proto
+  session.proto
+  authority.proto
+  projection.proto
+  config.proto
+
+              schema
+              /    \
+             /      \
+        Rust         TypeScript
+          │              │
+      nous-kernel ←──→ nous-host
+不是说现在立刻应该上 Protobuf。
+
+但它值得作为第一候选 qualification。
+
+尤其这个库源自 Anthropic 自己的生产需求，这对 Agent 系统这个场景是个很好的信号。
+
+10. 第二种：NAPI-RS，把 Rust 直接作为 TS native addon
+也完全可行：
+
+TypeScript
+    │
+    ▼
+@napi
+Rust
+napi-rs v3 当前可以直接把 Rust 类型/函数暴露给 JS，并生成 TypeScript declarations；Node-API 本身提供跨后续 Node 版本的 ABI 兼容性。
+
+使用体验可以做到类似：
+
+import {
+  query,
+  materialize,
+  commitMemory,
+} from "@nous/kernel";
+底下实际上是 Rust。
+
+这对 Coding Agent 极友好。
+
+11. 但我暂时把 NAPI-RS 放第二候选
+因为 Nous Kernel 不是一个简单算法库。
+
+它拥有：
+
+PostgreSQL
+serving lifecycle
+background-ish runtime resources
+object store
+Tokio
+HTTP/CLI
+large native indexes
+把整个 Kernel 压进 Node process 以后：
+
+Node lifecycle
++ Tokio lifecycle
++ native addon lifecycle
++ crash boundary
++ packaging
+会耦合起来。
+
+而我们本来又希望：
+
+No LLM
+No TS host
+时仍然能降级运行基本 Nous。
+
+因此独立 Rust kernel process 更符合我们前面定下的：
+
+Intelligence is an enhancement layer, not an availability prerequisite.
+
+12. “一个真正的 exe”也不是做不到
+现在 TS 已经有成熟的 standalone distribution。
+
+Deno deno compile 可以把 TS/JS 和运行时打成 self-contained native executable，并支持 Windows/macOS/Linux 及 cross-compilation。
+
+Bun 也支持：
+
+compile: true
+生成 standalone executable，并可以针对其他平台构建。
+
+Node 26 自己也已经支持：
+
+node --build-sea
+构造 Single Executable Application，不过 Node 官方仍把 SEA 标成 Stability: 1.1 - Active development。
+
+所以：
+
+TypeScript != 必须让用户安装 Node
+早已经不是事实。
+
+13. 但 Rust + TS 真正合成“一个文件”就没那么自然
+可以：
+
+方法 1
+TS executable 中嵌 Rust sidecar，首次运行 extract：
+
+nous-wave.exe
+├ embedded TS runtime
+├ TS application
+└ embedded nous-kernel.exe
+启动后：
+
+extract
+→ spawn kernel
+用户看起来还是一个 exe。
+
+Deno 已经有 self-extracting executable 的相关机制，并且其 compile 系统也考虑 native addons。
+
+方法 2
+Rust 编译成 .node native addon，通过 NAPI-RS 进入 JS executable。
+
+方法 3
+Rust 主程序嵌 V8/JS runtime，然后执行 bundled TS→JS。
+
+其中方法 3 我最不建议。
+
+因为我们会为了“一个文件”主动承担：
+
+embedded JS runtime lifecycle
+module loading
+runtime upgrades
+native module integration
+debugging
+这完全是 distribution requirement 反过来污染 architecture。
+
+14. WASM 也不适合成为这里的胶水
+Rust→WASM→TS 看起来很漂亮：
+
+Rust
+→ wasm
+→ TypeScript
+但我们的 Rust Kernel 有：
+
+SQLx/Postgres
+Tantivy
+USearch
+filesystem
+native object storage
+threads
+embedded PostgreSQL
+这些东西不适合为了 WASM 被重新适配。
+
+WASM 可以以后用于：
+
+plugin
+portable algorithm
+sandboxed extension
+而不是当前 kernel boundary。
+
+15. 更关键的是：新的语言边界应该同时成为 degradation boundary
+这个设计非常漂亮：
+
+┌─────────────────────────────┐
+│ TypeScript Cognitive Host   │
+│                             │
+│ Steward / Managed Context   │
+│ Persona orchestration       │
+│ Relationship orchestration  │
+│ LLM maintenance             │
+└──────────────┬──────────────┘
+               │
+        unavailable?
+               X
+               │
+┌──────────────▼──────────────┐
+│ Rust Cognitive Kernel       │
+│                             │
+│ exact                       │
+│ lexical                     │
+│ dense                       │
+│ topology                    │
+│ stored cognition            │
+│ deterministic projection    │
+└─────────────────────────────┘
+TS host 挂了：
+
+Nous != dead
+而是：
+
+Managed Cognition
+→ unavailable
+
+Steward
+→ unavailable
+
+LLM Dreaming
+→ unavailable
+
+basic cognitive retrieval
+→ still available
+这恰好实现我们刚讨论的 graceful degradation。
+
+16. 配置也会变得更合理
+可以统一一个配置树：
+
+[kernel]
+...
+
+[retrieval]
+...
+
+[cognition]
+...
+
+[cognition.projection]
+...
+
+[cognition.steward]
+...
+
+[models]
+...
+
+[managed_context]
+...
+然后：
+
+TS Host
+    resolves whole system config
+
+Rust Kernel
+    owns/parses kernel-relevant typed subset
+如果 Host 不存在：
+
+Rust
+→ loads kernel defaults + kernel config
+仍然可以运行。
+
+所以仍满足：
+
+先统一可配置，再决定给不给用户配置。
+
+而不会因为拆语言导致两个互相冲突的配置系统。
+
+17. Persona / Relationship 不必预先决定用 Rust
+这一点我现在也会改变此前的默认假设。
+
+未来：
+
+Persona
+Relationship
+Goals
+Epistemic
+应该分别问：
+
+它真正有什么 hot path？
+
+而不是：
+
+它是 Nous MicroSystem，所以应该建一个 Rust crate。
+
+例如 Relationship 的：
+
+relationship interpretation
+social-state evolution
+projection
+LLM proposal
+完全可能主要在 TS。
+
+但如果它出现：
+
+millions of temporal social edges
+high-frequency graph query
+那部分再沉到 Rust kernel。
+
+可以形成：
+
+Relationship semantic orchestration — TS
+Relationship graph index kernel     — Rust
+这才是真正的 heterogeneous architecture。
+
+18. 我会把语言政策暂时定成这样
+领域	默认语言
+PostgreSQL Authority / transactions	Rust
+object/material I/O	Rust
+lexical/dense/topology serving	Rust
+EPA/Residual/Wave	Rust
+deterministic fallback retrieval	Rust
+existing Memory domain/commit semantics	Rust，暂不迁移
+model/provider orchestration	TypeScript
+Session Steward	TypeScript
+Cognitive Projection high-level orchestration	TypeScript
+Managed Context	TypeScript
+Agent Query Language	TypeScript
+capability routing	TypeScript
+new Persona/Relationship orchestration	TS-first，按需下沉 Rust
+research/benchmark/notebook	Python
+performance kernels discovered later	Rust
+这并不是永久不可更改的规则。
+
+更准确地说：
+
+Rust-by-default
+应该结束。
+
+变成：
+
+choose language by ownership + workload
+19. 我甚至建议以后不要把仓库叫“Cargo workspace”作为最高层结构
+现在是：
+
+Nous-Wave/
+├ Cargo.toml
+├ crates/
+└ apps/nous-wave/
+以后可能是：
+
+Nous-Wave/
+├ apps/
+│  ├ nous-host/          # TypeScript
+│  └ nous-cli/...
+│
+├ rust/
+│  ├ crates/
+│  └ apps/nous-kernel/
+│
+├ packages/
+│  ├ cognitive-query/
+│  ├ model-capabilities/
+│  └ ...
+│
+├ proto/                 # if typed RPC selected
+│
+├ config/
+│
+├ docs/
+│
+├ package.json
+├ pnpm-workspace.yaml
+├ Cargo.toml
+└ justfile
+不过具体树现在不应该锁。
+
+先决定语言边界，再决定 monorepo layout。
+
+20. 我目前最推荐的最终运行形态
+不是：
+
+Nous Wave = one Rust exe
+而是：
+
+             Nous Wave Product
+                    │
+        ┌───────────┴────────────┐
+        │                        │
+    nous-host               nous-kernel
+    TypeScript                 Rust
+        │                        │
+ cognition/control         authority/data
+ managed context           retrieval/serving
+ LLM capabilities          deterministic fallback
+        │                        │
+        └──────── typed API ─────┘
+Distribution：
+
+one installer / app bundle
+不是强求：
+
+one physical executable
+如果以后发现单文件分发确实有巨大价值，再选择：
+
+Deno/Bun standalone
++ embedded/extracted Rust kernel
+或者 NAPI-RS。
+
+而不是今天为了单 exe 把整个系统锁死 Rust。
+
+我认为这已经值得在当前 Corrective Closure 完成后，先做一次专门的 Language Boundary / Runtime Topology Research，而不是直接开始 Persona 或 Managed Context 实现。
+
+其中真正需要 qualification 的其实只有两个候选：
+
+A. TypeScript Host ↔ Rust Kernel
+   ConnectRPC / typed local process boundary
+
+B. TypeScript Host ↔ Rust Kernel
+   NAPI-RS same-process boundary
+我当前明显偏向 A。尤其 Connect 的 Rust 实现刚刚由 Anthropic 贡献进官方项目，并原生支持 Axum，而我们的 Kernel 已经在 Axum 上，这个时间点相当合适。
+
+这样既保住 Rust 在该用的地方的优势，也终于停止让 Rust 去承担它并不擅长、而 Coding Agent 又会频繁修改的大量认知编排代码。
+
+
+星期三 20:47
+立刻总结并记录以上探讨的设计，记录进文件。
+
+已记录为一份长期设计记录，不是执行 Spec，也没有把尚未实现的方向写成既成事实。
+
+下载 Nous Wave Cognitive Runtime / Projection / Context / Language Design Record
+
+文件覆盖了这轮讨论的核心内容：
+
+Subject / Agent / Model / Session / Consumer 的边界；
+
+Active Cognition 分层、Focus、Working Knowledge、Continuation；
+
+Session-scoped Steward；
+
+Memory / Persona / Relationship 等统一接入 Cognitive Projection Runtime；
+
+Assistive Cognition 与 Managed Cognition；
+
+Context Compiler、context epoch、cache-aware 拼接；
+
+Dreaming / maintenance 的触发与 proposal-first 语义；
+
+LLM-enhanced but not LLM-dependent 的降级；
+
+Agent Query Language → typed AST；
+
+内部多模型 capability routing；
+
+“先统一可配置，再决定用户是否可配”的配置体系；
+
+Rust-only 假设的解除；
+
+当前倾向的 Rust Cognitive Kernel + TypeScript Cognitive Host；
+
+Rust↔TS 进程/RPC/N-API 候选边界；
+
+后续需要专门研究、尚未锁定的决策项。 
+
+
+Nous_Wave_Cognitive_Runtime_Projection_Context_Language_Design_Record_2026-09-09.md
+文档
+
+
+
+Session Handoff.md
+文件
+
+Session-Handoff-2026-09-09-20-47.md 
+
+ 
+
+
+Session-Handoff-2026-09-09-20-47.md
+文档

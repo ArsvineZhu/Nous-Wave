@@ -5,28 +5,6 @@ use sqlx::Row;
 pub use types::*;
 
 impl CognitiveRuntimeService {
-    pub async fn materialize_resource(
-        &self,
-        subject: SubjectId,
-        resource: &ResourceRef,
-        handle: &str,
-    ) -> Result<ResourceMaterial> {
-        let descriptor = self
-            .list_resources(subject)
-            .await?
-            .into_iter()
-            .find(|view| view.descriptor.resource_ref == *resource)
-            .ok_or_else(|| Error::NotFound("Resource not found".into()))?
-            .descriptor;
-        let resolver = self
-            .resource_resolvers
-            .read()
-            .map_err(|_| Error::Infrastructure("resource resolver lock poisoned".into()))?
-            .get(&descriptor.resolver_key)
-            .cloned()
-            .ok_or_else(|| Error::Unavailable("Resource resolver is unavailable".into()))?;
-        resolver.materialize(handle).await
-    }
     pub async fn upsert_resource(
         &self,
         subject: SubjectId,
@@ -34,9 +12,9 @@ impl CognitiveRuntimeService {
     ) -> Result<ResourceView> {
         self.require_subject(subject).await?;
         ResourceRef::new(input.resource_ref.as_str())?;
-        if input.resolver_key.trim().is_empty() || input.authority_class.trim().is_empty() {
+        if input.authority_class.trim().is_empty() {
             return Err(Error::Invalid(
-                "resource resolver_key/authority_class is required".into(),
+                "resource authority_class is required".into(),
             ));
         }
         if !matches!(
@@ -46,9 +24,9 @@ impl CognitiveRuntimeService {
             return Err(Error::Invalid("invalid resource readiness".into()));
         }
         let mut tx = self.store.begin().await?;
-        sqlx::query("INSERT INTO resources(subject_id,resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,resolver_key,readiness,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(subject_id,resource_ref) DO UPDATE SET display_label=excluded.display_label,authority_class=excluded.authority_class,coverage=excluded.coverage,query_dimensions=excluded.query_dimensions,modalities=excluded.modalities,freshness_policy=excluded.freshness_policy,access_cost_class=excluded.access_cost_class,resolver_key=excluded.resolver_key,readiness=excluded.readiness,updated_at=excluded.updated_at")
-            .bind(subject.0).bind(input.resource_ref.as_str()).bind(input.display_label).bind(input.authority_class).bind(input.coverage).bind(input.query_dimensions).bind(input.modalities).bind(input.freshness_policy).bind(input.access_cost_class).bind(input.resolver_key).bind(input.readiness).bind(Utc::now()).execute(&mut *tx).await.map_err(db)?;
-        let row=sqlx::query("SELECT resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,resolver_key,readiness,updated_at FROM resources WHERE subject_id=$1 AND resource_ref=$2").bind(subject.0).bind(input.resource_ref.as_str()).fetch_one(&mut *tx).await.map_err(db)?;
+        sqlx::query("INSERT INTO resources(subject_id,resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,readiness,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(subject_id,resource_ref) DO UPDATE SET display_label=excluded.display_label,authority_class=excluded.authority_class,coverage=excluded.coverage,query_dimensions=excluded.query_dimensions,modalities=excluded.modalities,freshness_policy=excluded.freshness_policy,access_cost_class=excluded.access_cost_class,readiness=excluded.readiness,updated_at=excluded.updated_at")
+            .bind(subject.0).bind(input.resource_ref.as_str()).bind(input.display_label).bind(input.authority_class).bind(input.coverage).bind(input.query_dimensions).bind(input.modalities).bind(input.freshness_policy).bind(input.access_cost_class).bind(input.readiness).bind(Utc::now()).execute(&mut *tx).await.map_err(db)?;
+        let row=sqlx::query("SELECT resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,readiness,updated_at FROM resources WHERE subject_id=$1 AND resource_ref=$2").bind(subject.0).bind(input.resource_ref.as_str()).fetch_one(&mut *tx).await.map_err(db)?;
         nous_authority_store::AuthorityStore::invalidate_in(
             &mut tx,
             subject,
@@ -94,7 +72,7 @@ impl CognitiveRuntimeService {
     }
 
     pub async fn list_resources(&self, subject: SubjectId) -> Result<Vec<ResourceView>> {
-        let rows=sqlx::query("SELECT resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,resolver_key,readiness,updated_at FROM resources WHERE subject_id=$1 ORDER BY resource_ref").bind(subject.0).fetch_all(self.store.pool()).await.map_err(db)?;
+        let rows=sqlx::query("SELECT resource_ref,display_label,authority_class,coverage,query_dimensions,modalities,freshness_policy,access_cost_class,readiness,updated_at FROM resources WHERE subject_id=$1 ORDER BY resource_ref").bind(subject.0).fetch_all(self.store.pool()).await.map_err(db)?;
         rows.into_iter()
             .map(|row| {
                 Ok(ResourceView {
@@ -104,11 +82,6 @@ impl CognitiveRuntimeService {
             .collect()
     }
 
-    // Resource routing keeps capability, authority and degradation semantics together.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "resource routing keeps capability, authority and degradation decisions together"
-    )]
     pub async fn resource_actions_for_query(
         &self,
         query: &CognitiveQuery,
@@ -117,6 +90,7 @@ impl CognitiveRuntimeService {
         if query.resources.current_authority == CurrentAuthorityNeed::None
             && !query.resources.synopsis_only
             && !plan.prefer_resource_synopsis
+            && !query.cues.iter().any(|cue| matches!(cue, Cue::Resource(_)))
         {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -124,116 +98,45 @@ impl CognitiveRuntimeService {
             .cues
             .iter()
             .filter_map(|cue| match cue {
-                Cue::Resource(resource) => Some(resource.resource.as_str()),
+                Cue::Resource(r) => Some(r.resource.as_str()),
                 _ => None,
             })
             .collect::<HashSet<_>>();
         let resources = self.list_resources(query.subject).await?;
-        let resolvers = self
-            .resource_resolvers
-            .read()
-            .map_err(|_| Error::Infrastructure("resource resolver lock poisoned".into()))?
-            .clone();
-        let mut actions = Vec::new();
-        let mut degradation = Vec::new();
-        for resource in resources.into_iter().take(plan.resource_limit) {
-            let descriptor = resource.descriptor;
-            if descriptor.readiness != "ready"
-                || (!requested.is_empty() && !requested.contains(descriptor.resource_ref.as_str()))
-            {
-                continue;
+        let actions = resources
+            .into_iter()
+            .filter(|r| {
+                requested.is_empty() || requested.contains(r.descriptor.resource_ref.as_str())
+            })
+            .take(plan.resource_limit)
+            .map(|r| ResourceActionSuggestion {
+                resource: r.descriptor.resource_ref,
+                action: if query.resources.synopsis_only || plan.prefer_resource_synopsis {
+                    "inspect_synopsis"
+                } else {
+                    "query_current_authority"
+                }
+                .into(),
+                reason: format!(
+                    "Consumer must access external authority; descriptor readiness={}",
+                    r.descriptor.readiness
+                ),
+                current_authority: false,
+                records: vec![],
+                evidence: vec![],
+            })
+            .collect();
+        let degradation = vec![Degradation {
+            code: if query.resources.current_authority == CurrentAuthorityNeed::Required {
+                "required_external_authority_unresolved"
+            } else {
+                "external_resource_action_required"
             }
-            let Some(resolver) = resolvers.get(&descriptor.resolver_key).cloned() else {
-                if query.resources.current_authority == CurrentAuthorityNeed::Required {
-                    return Err(Error::Unavailable(format!(
-                        "resource resolver '{}' is unavailable",
-                        descriptor.resolver_key
-                    )));
-                }
-                degradation.push(Degradation {
-                    code: "resource_unavailable".into(),
-                    detail: Some(format!(
-                        "resolver '{}' is not registered",
-                        descriptor.resolver_key
-                    )),
-                });
-                continue;
-            };
-            let result = resolver
-                .query(
-                    &descriptor.resource_ref,
-                    ResourceQuery {
-                        dimensions: descriptor.query_dimensions.clone(),
-                        synopsis_only: query.resources.synopsis_only,
-                        prefer_synopsis: plan.prefer_resource_synopsis,
-                        limit: plan.resource_limit,
-                    },
-                )
-                .await;
-            match result {
-                Ok(result) => {
-                    if !result.current_authority
-                        && query.resources.current_authority == CurrentAuthorityNeed::Required
-                    {
-                        return Err(Error::Unavailable(
-                            "resource resolver did not return current authority".into(),
-                        ));
-                    }
-                    if !result.current_authority {
-                        degradation.push(Degradation {
-                            code: "resource_unavailable".into(),
-                            detail: Some(
-                                "resolver returned a historical or non-authoritative result".into(),
-                            ),
-                        });
-                    }
-                    if let Some(detail) = result.degraded {
-                        degradation.push(Degradation {
-                            code: "resource_unavailable".into(),
-                            detail: Some(detail),
-                        });
-                    }
-                    actions.push(ResourceActionSuggestion {
-                        resource: descriptor.resource_ref,
-                        action: "query_current_authority".into(),
-                        reason: format!(
-                            "resolver returned {} current records",
-                            result.records.len()
-                        ),
-                        current_authority: result.current_authority,
-                        records: result.records,
-                        evidence: if query.result_need.need_evidence {
-                            result.evidence
-                        } else {
-                            Vec::new()
-                        },
-                    });
-                }
-                Err(error)
-                    if query.resources.current_authority == CurrentAuthorityNeed::Required =>
-                {
-                    return Err(Error::Unavailable(format!(
-                        "current resource authority query failed: {error}"
-                    )));
-                }
-                Err(error) => degradation.push(Degradation {
-                    code: "resource_unavailable".into(),
-                    detail: Some(error.to_string()),
-                }),
-            }
-        }
-        if query.resources.current_authority == CurrentAuthorityNeed::Required && actions.is_empty()
-        {
-            return Err(Error::Unavailable(
-                "required current resource authority is unavailable".into(),
-            ));
-        }
-        if query.resources.current_authority == CurrentAuthorityNeed::Prefer && actions.is_empty() {
-            degradation.push(Degradation {
-                code: "resource_unavailable".into(),
-                detail: Some("no ready matching current resource authority".into()),
-            });
-        }
+            .into(),
+            detail: Some(
+                "Kernel returned resource awareness; external access has not occurred".into(),
+            ),
+        }];
         Ok((actions, degradation))
     }
 }
@@ -252,7 +155,6 @@ pub(crate) fn decode_resource(
         modalities: row.try_get("modalities").map_err(db)?,
         freshness_policy: row.try_get("freshness_policy").map_err(db)?,
         access_cost_class: row.try_get("access_cost_class").map_err(db)?,
-        resolver_key: row.try_get("resolver_key").map_err(db)?,
         readiness: row.try_get("readiness").map_err(db)?,
         updated_at: row.try_get("updated_at").map_err(db)?,
     })

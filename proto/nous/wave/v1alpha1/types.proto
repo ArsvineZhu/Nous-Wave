@@ -1,0 +1,268 @@
+syntax = "proto3";
+package nous.wave.v1alpha1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// Identity kind is independent of display labels and source media.
+message CognitiveRef {
+  string kind = 1;
+  string value = 2;
+}
+message Degradation { string code = 1; string detail = 2; }
+message Page { uint32 page_size = 1; string page_token = 2; }
+message SubjectRequest { string subject_id = 1; }
+message ObjectRequest { string subject_id = 1; string id = 2; }
+message ListRequest { string subject_id = 1; Page page = 2; string status = 3; }
+message MutationResult { string id = 1; string etag = 2; }
+message CharacterSeed {
+  string text = 1;
+  string media_type = 2;
+  string source_ref = 3;
+  google.protobuf.Struct metadata = 4;
+}
+message Subject {
+  string subject_id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  int64 state_revision = 3;
+  string status = 4;
+  google.protobuf.Struct config = 5;
+}
+message CreateSubjectRequest {
+  optional string subject_id = 1;
+  CharacterSeed character_seed = 2;
+  google.protobuf.Struct config = 3;
+}
+message ListSubjectsResponse { repeated Subject items = 1; string next_page_token = 2; }
+message SeedRevision { CharacterSeed seed = 1; int32 revision = 2; google.protobuf.Timestamp created_at = 3; }
+message ReviseCharacterSeedRequest { string subject_id = 1; CharacterSeed seed = 2; }
+message Session {
+  string session_id = 1;
+  string subject_id = 2;
+  int64 runtime_revision = 3;
+  bool closed = 4;
+  repeated CognitiveRef resident_refs = 5;
+  optional string active_focus_id = 6;
+}
+message ListSessionsResponse { repeated Session items = 1; string next_page_token = 2; }
+message EntityMention { string surface = 1; optional string entity_ref = 2; optional string semantic_role = 3; }
+message InlineText { string text = 1; string media_type = 2; }
+message ObservationInput {
+  string subject_id = 1;
+  optional string session_id = 2;
+  optional string request_id = 3;
+  string source_class = 4;
+  optional string external_object_ref = 5;
+  google.protobuf.Timestamp occurred_at = 6;
+  google.protobuf.Timestamp observed_at = 7;
+  optional string conversation_ref = 8;
+  optional string actor_entity_ref = 9;
+  google.protobuf.Struct context = 10;
+  repeated EntityMention entities = 11;
+  bool admit = 12;
+  google.protobuf.Timestamp hold_until = 13;
+  oneof material {
+    InlineText inline_text = 20;
+    string artifact_id = 21;
+    string object_ref = 22;
+    google.protobuf.Value structured = 23;
+    string resource_ref = 24;
+  }
+}
+message AcceptedObservation {
+  string occurrence_id = 1;
+  optional string artifact_id = 2;
+  optional string source_region_id = 3;
+  bool resident = 4;
+  repeated string mention_ids = 5;
+}
+message TimeInterval { google.protobuf.Timestamp start = 1; google.protobuf.Timestamp end = 2; }
+message QueryConstraints {
+  repeated string source_classes_include = 1;
+  repeated string source_classes_exclude = 2;
+  repeated string memory_classes_include = 3;
+  repeated string memory_classes_exclude = 4;
+  repeated string entity_requirements = 5;
+  TimeInterval occurred = 6;
+  TimeInterval observed = 7;
+  TimeInterval valid = 8;
+  bool include_suppressed = 9;
+  optional string authority = 10;
+  repeated string modalities = 11;
+  repeated string evidence_classes = 12;
+}
+message Cue {
+  oneof cue {
+    string text = 1;
+    CognitiveRef reference = 2;
+    string concept = 3;
+  }
+}
+message QueryModifiers {
+  repeated string domains = 1;
+  QueryConstraints constraints = 2;
+  string effort = 3;
+  optional uint32 limit = 4;
+  string exploration = 5;
+  string current_authority = 6;
+  bool materialize = 7;
+  string diagnostics = 8;
+  repeated Preference preferences = 9;
+}
+message Preference { bool negative = 1; Cue cue = 2; string key = 3; }
+message QueryExpr {
+  string operation = 1; // atom | all | any
+  repeated Cue cues = 2;
+  repeated QueryExpr children = 3;
+  QueryModifiers modifiers = 4;
+}
+message QueryRequest {
+  string subject_id = 1;
+  optional string session_id = 2;
+  QueryExpr expression = 3;
+  optional string nousql = 4;
+}
+message Evidence { CognitiveRef reference = 1; string support_role = 2; }
+message Hit {
+  CognitiveRef reference = 1;
+  optional string revision_id = 2;
+  optional string text = 3;
+  string authority = 4;
+  repeated Evidence evidence = 5;
+  repeated string evidence_families = 6;
+  repeated string entity_refs = 7;
+  optional string lexical_ref = 8;
+  optional string semantic_role = 9;
+  optional string memory_class = 10;
+}
+message ResourceAction { string resource_ref = 1; string action = 2; string reason = 3; bool current_authority = 4; }
+message QueryResponse {
+  string query_id = 1;
+  string status = 2;
+  repeated Hit hits = 3;
+  repeated ResourceAction resource_actions = 4;
+  repeated Degradation degradation = 5;
+  optional string bound_query = 6;
+}
+message ReportUseRequest {
+  string subject_id = 1;
+  optional string session_id = 2;
+  string consumer_id = 3;
+  repeated UseEvent events = 4;
+}
+message UseEvent { CognitiveRef reference = 1; string kind = 2; google.protobuf.Struct context = 3; }
+message Memory {
+  string memory_id = 1;
+  string revision_id = 2;
+  string subject_id = 3;
+  string memory_class = 4;
+  string status = 5;
+  string etag = 6;
+  string semantic_role = 7;
+  string text = 8;
+  optional string title = 9;
+  repeated Evidence evidence = 10;
+  repeated string tags = 11;
+  google.protobuf.Timestamp occurred_at = 12;
+  google.protobuf.Timestamp observed_at = 13;
+  TimeInterval valid = 14;
+  string epistemic_class = 15;
+  optional double confidence = 16;
+  int32 revision_no = 17;
+}
+message ListMemoriesResponse { repeated Memory items = 1; string next_page_token = 2; }
+message FormMemoryRequest {
+  string subject_id = 1;
+  Memory input = 2;
+  repeated string entity_refs = 3;
+}
+message ReviseMemoryRequest {
+  string subject_id = 1;
+  string memory_id = 2;
+  string expected_etag = 3;
+  Memory input = 4;
+  optional string relation = 5;
+}
+message MemoryMutationRequest { string subject_id = 1; string memory_id = 2; string expected_etag = 3; }
+message MemoryHistoryRequest { string subject_id = 1; string memory_id = 2; Page page = 3; }
+message Artifact {
+  string artifact_id = 1;
+  string subject_id = 2;
+  string content_hash = 3;
+  uint64 byte_length = 4;
+  string media_type = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Struct metadata = 7;
+}
+message ListArtifactsResponse { repeated Artifact items = 1; string next_page_token = 2; }
+message MaterializeRequest {
+  string subject_id = 1;
+  CognitiveRef reference = 2;
+  uint64 max_bytes = 3;
+  optional uint64 start = 4;
+  optional uint64 end = 5;
+}
+message MaterializedEvidence {
+  CognitiveRef reference = 1;
+  string media_type = 2;
+  bytes content = 3;
+  repeated Evidence evidence = 4;
+  repeated Degradation degradation = 5;
+  uint64 total_bytes = 6;
+  uint64 range_start = 7;
+  uint64 range_end = 8;
+  bool partial = 9;
+}
+message Focus {
+  string focus_id = 1;
+  string descriptor = 2;
+  string state = 3;
+  repeated CognitiveRef references = 4;
+  optional string summary = 5;
+  int64 revision = 6;
+}
+message FocusRequest { string subject_id = 1; string session_id = 2; string focus_id = 3; }
+message MutateFocusRequest {
+  string subject_id = 1;
+  string session_id = 2;
+  int64 expected_runtime_revision = 3;
+  string operation = 4;
+  Focus focus = 5;
+}
+message FocusResponse { Focus focus = 1; int64 runtime_revision = 2; repeated Degradation degradation = 3; }
+message ListFocusesResponse { repeated Focus items = 1; int64 runtime_revision = 2; }
+message ProjectionRequest {
+  string subject_id = 1;
+  string session_id = 2;
+  optional string focus_id = 3;
+  string consumer_id = 4;
+  QueryExpr query = 5;
+  repeated CognitiveRef situation_refs = 6;
+  uint32 max_items = 7;
+  uint32 max_text_bytes = 8;
+}
+message ContextSegment {
+  string segment_id = 1;
+  string text = 2;
+  string semantic_role = 3;
+  repeated CognitiveRef source_refs = 4;
+  repeated Evidence evidence = 5;
+  string authority = 6;
+  string stability = 7;
+  optional string source_revision = 8;
+}
+message Projection {
+  string projection_id = 1;
+  string consumer_id = 2;
+  int64 source_runtime_revision = 3;
+  repeated ContextSegment segments = 4;
+  repeated Degradation degradation = 5;
+}
+message ContextCursor { string track_id = 1; string epoch_id = 2; uint32 revision = 3; }
+message ManagedContextRequest { ProjectionRequest projection = 1; ContextCursor known_cursor = 2; }
+message ManagedContextResponse { string kind = 1; ContextCursor cursor = 2; Projection projection = 3; }
+message CheckpointPayload {
+  oneof payload {
+    Focus focus = 1;
+  }
+}

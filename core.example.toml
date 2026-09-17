@@ -1,0 +1,19 @@
+kernel_executable = "./target/debug/nous-kernel.exe"
+kernel_config = "./config.example.toml"
+data_root = "./data/core"
+port = 9470
+max_upload_bytes = 8589934592
+
+# Model roles are optional. Model IDs are explicit deployment configuration.
+# AI SDK uses its configured provider credentials; no model is invoked by default.
+[models]
+
+[[consumers]]
+consumer_id = "default"
+revision = "1"
+memory = "PREFERRED"
+runtime = "OPTIONAL"
+resource = "OPTIONAL"
+max_items = 32
+max_text_bytes = 32768
+materialize = true

@@ -1,0 +1,14 @@
+syntax = "proto3";
+package nous.wave.v1alpha1;
+import "nous/wave/v1alpha1/types.proto";
+import "nous/wave/v1alpha1/management.proto";
+message ModelSourceRequest { string subject_id = 1; string source_id = 2; }
+message FormationResponse { Memory memory = 1; repeated Degradation degradation = 2; }
+message InterpretationResponse { DerivedRepresentation representation = 1; repeated Degradation degradation = 2; }
+message PrepareEmbeddingsRequest { string subject_id = 1; uint32 limit = 2; }
+message PrepareEmbeddingsResponse { uint32 committed = 1; repeated Degradation degradation = 2; }
+service ModelService {
+  rpc FormFromObservation(ModelSourceRequest) returns (FormationResponse);
+  rpc InterpretSource(ModelSourceRequest) returns (InterpretationResponse);
+  rpc PrepareEmbeddings(PrepareEmbeddingsRequest) returns (PrepareEmbeddingsResponse);
+}

@@ -16,6 +16,7 @@ System walkthrough:
 
 Research/source lineage:
 - [`docs/Nous_Wave/SOURCES.md`](docs/Nous_Wave/SOURCES.md)
+- [新架构、认知运行时与 NousQL 研究整理（中文）](docs/Nous_Wave/research/README.md)
 
 Core ownership:
 

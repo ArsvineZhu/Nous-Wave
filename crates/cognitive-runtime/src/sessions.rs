@@ -105,8 +105,12 @@ impl CognitiveRuntimeService {
         sqlx::query("INSERT INTO resident_refs(session_id,ref_kind,ref_value,entered_at,entry_reason,hold_until,state,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,'{}') ON CONFLICT(session_id,ref_kind,ref_value) DO UPDATE SET state=excluded.state,entry_reason=excluded.entry_reason,hold_until=COALESCE(excluded.hold_until,resident_refs.hold_until)")
             .bind(session.0).bind(kind).bind(value).bind(now).bind(reason).bind(hold_until).bind(state)
             .execute(self.store.pool()).await.map_err(db)?;
-        sqlx::query("UPDATE cognitive_sessions SET last_activity_at=$2,state_revision=state_revision+1 WHERE session_id=$1")
-            .bind(session.0).bind(now).execute(self.store.pool()).await.map_err(db)?;
+        sqlx::query("UPDATE cognitive_sessions SET last_activity_at=$2 WHERE session_id=$1")
+            .bind(session.0)
+            .bind(now)
+            .execute(self.store.pool())
+            .await
+            .map_err(db)?;
         Ok(())
     }
 

@@ -231,15 +231,6 @@ pub struct OccurrenceDescriptor {
     pub context: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FormationDirective {
-    #[default]
-    None,
-    ConsiderSpecific,
-    ExplicitSpecific,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeDirective {
     #[serde(default = "default_true")]
@@ -276,8 +267,6 @@ pub struct ObservationInput {
     pub material: ObservationMaterial,
     #[serde(default)]
     pub entities: Vec<ResolvedEntityMention>,
-    #[serde(default)]
-    pub formation: FormationDirective,
     #[serde(default)]
     pub runtime: RuntimeDirective,
 }

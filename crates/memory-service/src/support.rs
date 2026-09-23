@@ -46,7 +46,7 @@ impl MemoryService {
             .iter()
             .map(|entity| entity.as_str())
             .collect::<Vec<_>>();
-        let found: i64 = sqlx::query_scalar("SELECT count(*) FROM entity_mentions m JOIN entity_binding_revisions b ON b.mention_id=m.mention_id WHERE (m.occurrence_id IN (SELECT occurrence_id FROM memory_revision_evidence WHERE memory_revision_id=$1 AND occurrence_id IS NOT NULL) OR m.source_region_id IN (SELECT source_region_id FROM memory_revision_evidence WHERE memory_revision_id=$1 AND source_region_id IS NOT NULL) OR m.derived_region_id IN (SELECT derived_region_id FROM memory_revision_evidence WHERE memory_revision_id=$1 AND derived_region_id IS NOT NULL)) AND b.revision_no=(SELECT max(b2.revision_no) FROM entity_binding_revisions b2 WHERE b2.mention_id=b.mention_id) AND b.entity_ref=ANY($2) AND b.binding_state='bound'")
+        let found: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_revision_entities WHERE memory_revision_id=$1 AND entity_ref=ANY($2)")
             .bind(revision).bind(values).fetch_one(self.store.pool()).await.map_err(db)?;
         Ok(found > 0)
     }
@@ -68,7 +68,7 @@ impl MemoryService {
     }
 
     pub(crate) async fn memory_source_classes(&self, revision: Uuid) -> Result<Vec<String>> {
-        sqlx::query_scalar::<_, String>("SELECT DISTINCT o.source_class FROM memory_revision_evidence e JOIN observation_occurrences o ON o.occurrence_id=e.occurrence_id WHERE e.memory_revision_id=$1 UNION SELECT DISTINCT o.source_class FROM memory_revision_evidence e JOIN source_regions sr ON sr.source_region_id=e.source_region_id JOIN observation_occurrences o ON o.artifact_id=sr.artifact_id WHERE e.memory_revision_id=$1")
+        sqlx::query_scalar::<_, String>("SELECT DISTINCT source_class FROM memory_evidence_occurrences WHERE memory_revision_id=$1")
             .bind(revision).fetch_all(self.store.pool()).await.map_err(db)
     }
 
@@ -132,7 +132,7 @@ impl MemoryService {
     }
 
     pub(crate) async fn revision_entities(&self, revision: Uuid) -> Result<Vec<String>> {
-        sqlx::query_scalar::<_, String>("SELECT DISTINCT b.entity_ref FROM memory_revision_evidence e JOIN entity_mentions m ON (m.occurrence_id=e.occurrence_id OR m.source_region_id=e.source_region_id OR m.derived_region_id=e.derived_region_id) JOIN entity_binding_revisions b ON b.mention_id=m.mention_id WHERE e.memory_revision_id=$1 AND b.revision_no=(SELECT max(b2.revision_no) FROM entity_binding_revisions b2 WHERE b2.mention_id=b.mention_id) AND b.binding_state='bound' AND b.entity_ref IS NOT NULL ORDER BY b.entity_ref")
+        sqlx::query_scalar::<_, String>("SELECT DISTINCT entity_ref FROM memory_revision_entities WHERE memory_revision_id=$1 ORDER BY entity_ref")
             .bind(revision).fetch_all(self.store.pool()).await.map_err(db)
     }
 
@@ -294,9 +294,9 @@ pub(crate) async fn insert_evidence(
             (None, None, None, Some(derived_region_id.0))
         }
     };
-    sqlx::query("INSERT INTO memory_revision_evidence(memory_revision_id,evidence_no,occurrence_id,source_region_id,derived_representation_id,derived_region_id,support_role,weight) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+    sqlx::query("INSERT INTO memory_revision_evidence(memory_revision_id,evidence_no,occurrence_id,source_region_id,derived_representation_id,derived_region_id,support_role) VALUES($1,$2,$3,$4,$5,$6,$7)")
         .bind(revision.0).bind(evidence.evidence_no).bind(occurrence).bind(source).bind(derived).bind(derived_region)
-        .bind(format!("{:?}",evidence.support_role).to_lowercase()).bind(evidence.weight)
+        .bind(format!("{:?}",evidence.support_role).to_lowercase())
         .execute(&mut **tx).await.map_err(db)?;
     Ok(())
 }
@@ -332,7 +332,6 @@ pub(crate) fn decode_evidence(row: sqlx::postgres::PgRow) -> Result<MemoryRevisi
         evidence_no: row.try_get("evidence_no").map_err(db)?,
         evidence,
         support_role: parse_support(&row.try_get::<String, _>("support_role").map_err(db)?)?,
-        weight: row.try_get("weight").map_err(db)?,
     })
 }
 
@@ -356,12 +355,11 @@ pub(crate) fn parse_memory_status(value: &str) -> Result<MemoryStatus> {
         )),
     }
 }
-pub(crate) fn parse_supersession(value: &str) -> Result<SupersessionState> {
+pub(crate) fn parse_revision_lifecycle(value: &str) -> Result<RevisionLifecycle> {
     match value {
-        "current" => Ok(SupersessionState::Current),
-        "superseded" => Ok(SupersessionState::Superseded),
-        "contradicted" => Ok(SupersessionState::Contradicted),
-        "revoked" => Ok(SupersessionState::Revoked),
+        "current" => Ok(RevisionLifecycle::Current),
+        "superseded" => Ok(RevisionLifecycle::Superseded),
+        "revoked" => Ok(RevisionLifecycle::Revoked),
         _ => Err(Error::Infrastructure(
             "invalid revision state in Authority".into(),
         )),
@@ -394,12 +392,6 @@ pub(crate) fn parse_support(value: &str) -> Result<SupportRole> {
 }
 pub(crate) fn subject_id_from_row(row: &sqlx::postgres::PgRow) -> Result<SubjectId> {
     Ok(SubjectId(row.try_get("subject_id").map_err(db)?))
-}
-pub(crate) fn interval_contains(interval: Option<TimeInterval>, value: DateTime<Utc>) -> bool {
-    interval.is_none_or(|interval| {
-        interval.start.is_none_or(|start| value >= start)
-            && interval.end.is_none_or(|end| value <= end)
-    })
 }
 pub(crate) fn interval_overlaps(
     requested: Option<TimeInterval>,
@@ -447,4 +439,8 @@ mod ordering_tests {
             &[Some(provenance.clone()), Some(provenance)]
         ));
     }
+}
+
+pub(crate) fn parse_accessibility_mode(value:&str)->Result<AccessibilityMode>{
+    serde_json::from_value(serde_json::Value::String(value.into())).map_err(|_|Error::Infrastructure("invalid accessibility mode".into()))
 }

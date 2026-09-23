@@ -804,7 +804,7 @@ pub struct CognitiveHit {
     pub match_evidence: MatchEvidence,
     #[serde(default)]
     pub materialization: Vec<MaterializationHandle>,
-    pub supersession_state: Option<String>,
+    pub revision_lifecycle: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

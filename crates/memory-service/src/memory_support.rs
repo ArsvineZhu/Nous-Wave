@@ -57,13 +57,14 @@ pub(crate) async fn insert_anchor_in_tx(
         .execute(&mut **tx)
         .await
         .map_err(db)?;
-    sqlx::query("INSERT INTO anchor_revisions(anchor_revision_id,anchor_id,revision_no,label,description,origin,created_at) VALUES($1,$2,1,$3,$4,$5,$6)")
+    sqlx::query("INSERT INTO anchor_revisions(anchor_revision_id,anchor_id,revision_no,label,description,origin,created_at,confirmed) VALUES($1,$2,1,$3,$4,$5,$6,$7)")
         .bind(revision_id)
         .bind(anchor_id.0)
         .bind(anchor.label.clone())
         .bind(&anchor.description)
         .bind(origin)
         .bind(now)
+        .bind(anchor.confirmed)
         .execute(&mut **tx)
         .await
         .map_err(db)?;
@@ -112,61 +113,32 @@ pub(crate) async fn insert_association_in_tx(
 }
 
 pub(crate) async fn insert_revision_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    subject: SubjectId,
-    current: &MemoryView,
-    proposal: &TopologyRevisionProposal,
-) -> Result<MemoryRevisionId> {
-    let new_id = MemoryRevisionId::new();
-    let next_no = current.revision.revision_no + 1;
-    let now = Utc::now();
-    sqlx::query("UPDATE memory_revisions SET supersession_state=$2 WHERE memory_revision_id=$1")
-        .bind(current.revision.memory_revision_id.0)
-        .bind(match proposal.relation {
-            MemoryRelation::Contradicts => "contradicted",
-            _ => "superseded",
-        })
-        .execute(&mut **tx)
-        .await
-        .map_err(db)?;
-    sqlx::query("INSERT INTO memory_revisions(memory_revision_id,memory_id,subject_id,revision_no,parent_revision_id,semantic_role,title,representation_text,attributes,epistemic_class,confidence,occurred_at,observed_at,valid_from,valid_to,created_at,supersession_state) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'{}',$9,$10,$11,$12,$13,$14,$15,'current')")
-        .bind(new_id.0)
-        .bind(current.object.memory_id.0)
-        .bind(subject.0)
-        .bind(next_no)
-        .bind(current.revision.memory_revision_id.0)
-        .bind(proposal.semantic_role.as_deref().unwrap_or(&current.revision.semantic_role))
-        .bind(proposal.title.as_ref().or(current.revision.title.as_ref()))
-        .bind(&proposal.representation_text)
-        .bind(format!("{:?}", proposal.epistemic_class).to_lowercase())
-        .bind(proposal.confidence)
-        .bind(proposal.occurred_at)
-        .bind(now)
-        .bind(proposal.valid_from)
-        .bind(proposal.valid_to)
-        .bind(now)
-        .execute(&mut **tx)
-        .await
-        .map_err(db)?;
-    sqlx::query(
-        "UPDATE memory_objects SET current_revision_id=$2 WHERE subject_id=$1 AND memory_id=$3",
-    )
-    .bind(subject.0)
-    .bind(new_id.0)
-    .bind(current.object.memory_id.0)
-    .execute(&mut **tx)
-    .await
-    .map_err(db)?;
-    sqlx::query("INSERT INTO memory_revision_relations(from_revision_id,to_revision_id,relation,created_at) VALUES($1,$2,$3,$4)")
-        .bind(new_id.0)
-        .bind(current.revision.memory_revision_id.0)
-        .bind(proposal.relation.as_str())
-        .bind(now)
-        .execute(&mut **tx)
-        .await
-        .map_err(db)?;
-    for evidence in &proposal.evidence {
-        insert_evidence(tx, new_id, evidence).await?;
-    }
+    tx:&mut sqlx::Transaction<'_,sqlx::Postgres>,subject:SubjectId,current:&MemoryView,proposal:&TopologyRevisionProposal,
+)->Result<MemoryRevisionId>{
+    let semantic_role=proposal.semantic_role.as_deref().unwrap_or(&current.revision.semantic_role);
+    ExplicitMemoryInput{subject,memory_class:current.object.memory_class,semantic_role:semantic_role.into(),representation_text:proposal.representation_text.clone(),title:proposal.title.clone(),evidence:proposal.evidence.clone(),entity_refs:proposal.entity_refs.clone(),tags:vec![],tag_order_provenance:None,valid_from:proposal.valid_from,valid_to:proposal.valid_to,epistemic_class:proposal.epistemic_class}.validate()?;
+    let new_id=MemoryRevisionId::new();let now=Utc::now();
+    sqlx::query("UPDATE memory_revisions SET revision_lifecycle='superseded' WHERE memory_revision_id=$1 AND revision_lifecycle='current'")
+        .bind(current.revision.memory_revision_id.0).execute(&mut **tx).await.map_err(db)?;
+    let lifecycle=if proposal.intent==RevisionIntent::Revoke{"revoked"}else{"current"};
+    sqlx::query("INSERT INTO memory_revisions(memory_revision_id,memory_id,subject_id,revision_no,parent_revision_id,semantic_role,title,representation_text,attributes,epistemic_class,valid_from,valid_to,created_at,revision_lifecycle,revision_intent) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'{}',$9,$10,$11,$12,$13,$14)")
+        .bind(new_id.0).bind(current.object.memory_id.0).bind(subject.0).bind(current.revision.revision_no+1).bind(current.revision.memory_revision_id.0).bind(semantic_role).bind(proposal.title.as_ref().or(current.revision.title.as_ref())).bind(&proposal.representation_text).bind(format!("{:?}",proposal.epistemic_class).to_lowercase()).bind(proposal.valid_from).bind(proposal.valid_to).bind(now).bind(lifecycle).bind(format!("{:?}",proposal.intent).to_lowercase())
+        .execute(&mut **tx).await.map_err(db)?;
+    let changed=sqlx::query("UPDATE memory_objects SET current_revision_id=$2 WHERE subject_id=$1 AND memory_id=$3 AND head_revision=$4")
+        .bind(subject.0).bind(new_id.0).bind(current.object.memory_id.0).bind(proposal.expected_head_revision).execute(&mut **tx).await.map_err(db)?;
+    if changed.rows_affected()!=1{return Err(Error::Conflict("stale Memory head revision".into()));}
+    sqlx::query("INSERT INTO memory_revision_relations(from_revision_id,to_revision_id,relation,created_at) VALUES($1,$2,'supersedes',$3)")
+        .bind(new_id.0).bind(current.revision.memory_revision_id.0).bind(now).execute(&mut **tx).await.map_err(db)?;
+    for evidence in &proposal.evidence{insert_evidence(tx,new_id,evidence).await?;}
+    insert_memory_entities(tx,new_id,&proposal.entity_refs,"explicit_revision").await?;
     Ok(new_id)
+}
+
+pub(crate) async fn insert_memory_entities(tx:&mut sqlx::Transaction<'_,sqlx::Postgres>,revision:MemoryRevisionId,entities:&[EntityRef],operation:&str)->Result<()> {
+    for entity in entities {
+        EntityRef::new(entity.as_str())?;
+        sqlx::query("INSERT INTO memory_revision_entities(memory_revision_id,entity_ref,role,provenance) VALUES($1,$2,'about',$3) ON CONFLICT DO NOTHING")
+            .bind(revision.0).bind(entity.as_str()).bind(serde_json::json!({"operation":operation})).execute(&mut **tx).await.map_err(db)?;
+    }
+    Ok(())
 }

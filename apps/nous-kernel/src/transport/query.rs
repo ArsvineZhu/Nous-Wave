@@ -180,7 +180,7 @@ impl KernelService {
         if preference.key=="recent"{
             let mut dates=HashMap::new();
             for h in &result.results{
-                if let CognitiveRef::Memory(memory)=h.reference{dates.insert(h.reference.clone(),self.0.require_memory()?.memory(subject,memory,None).await?.revision.observed_at);}
+                if let CognitiveRef::Memory(memory)=h.reference{dates.insert(h.reference.clone(),self.0.require_memory()?.memory(subject,memory,None).await?.revision.created_at);}
             }
             result.results.sort_by_key(|h|std::cmp::Reverse(dates.get(&h.reference).copied()));
             if preference.negative{result.results.reverse();}
@@ -429,5 +429,6 @@ fn hit(h: CognitiveHit) -> p::Hit {
         lexical_ref: None,
         semantic_role: h.semantic_role,
         memory_class: h.memory_class,
+        revision_lifecycle:h.revision_lifecycle,
     }
 }

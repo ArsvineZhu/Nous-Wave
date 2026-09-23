@@ -117,6 +117,7 @@ export async function createCore(settings: CoreOptions) {
     getCharacterSeed:(r,c)=>kernel.authority.getCharacterSeed(r,options(c)),reviseCharacterSeed:(r,c)=>kernel.authority.reviseCharacterSeed(r,options(c)),
   };
   const memories: ServiceImpl<typeof MemoryService> = {
+    setAccessibility:(r,c)=>kernel.authority.setAccessibility(r,options(c)),linkRevisions:(r,c)=>kernel.authority.linkRevisions(r,options(c)),
     consolidateMemory:(r,c)=>kernel.authority.consolidateMemory(r,options(c)),
     getMemory:(r,c)=>kernel.authority.getMemory(r,options(c)),listMemories:(r,c)=>kernel.authority.listMemories(r,options(c)),
     getMemoryRevision:(r,c)=>kernel.authority.getMemoryRevision(r,options(c)),listMemoryRevisions:(r,c)=>kernel.authority.listMemoryRevisions(r,options(c)),

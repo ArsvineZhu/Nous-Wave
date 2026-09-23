@@ -65,8 +65,8 @@ it("runs Client → Core → Kernel contracts with durable retry, head fencing a
   expect(first.occurrenceId).toBe(replay.occurrenceId);
   await expect(client.cognition.observe({ ...observation, material: { case: "inlineText", value: { text: "different", mediaType: "text/plain" } } })).rejects.toMatchObject({ code: 10 });
   const evidence = [{ reference: { kind: "occurrence", value: first.occurrenceId }, supportRole: "direct" }];
-  const memory = await client.memory.form({ subjectId, input: { memoryClass: "specific", semanticRole: "episode", text: "Alice studies Rust ownership", epistemicClass: "observed", observedAt: now, evidence } });
-  const edited = await client.memory.revise({ subjectId, memoryId: memory.memoryId, expectedEtag: memory.etag, input: { text: "Alice studies Rust ownership in school", semanticRole: "episode", epistemicClass: "observed", evidence } });
+  const memory = await client.memory.form({ subjectId, input: { memoryClass: "specific", semanticRole: "episode", text: "Alice studies Rust ownership", epistemicClass: "observed", evidence } });
+  const edited = await client.memory.revise({intent:"correct", subjectId, memoryId: memory.memoryId, expectedEtag: memory.etag, input: { text: "Alice studies Rust ownership in school", semanticRole: "episode", epistemicClass: "observed", evidence } });
   await expect(client.memory.suppress({ subjectId, memoryId: memory.memoryId, expectedEtag: memory.etag })).rejects.toMatchObject({ code: 10 });
   const suppressed = await client.memory.suppress({ subjectId, memoryId: memory.memoryId, expectedEtag: edited.etag });
   const restored = await client.memory.restore({ subjectId, memoryId: memory.memoryId, expectedEtag: suppressed.etag });
@@ -104,7 +104,7 @@ it("keeps lexical identity exact and tombstoned across Memory purge",async()=>{
   expect(ambiguous.status).toBe("AMBIGUOUS_REFERENCE");expect(ambiguous.candidates).toHaveLength(2);
   await expect(client.cognition.query({subjectId,nousql:'@e("Alice")'})).rejects.toMatchObject({code:3});
   const observation=await client.cognition.observe({subjectId,sourceClass:"file",observedAt:now,material:{case:"inlineText",value:{text:"Research on Rust ownership",mediaType:"text/plain"}}});
-  const memory=await client.memory.form({subjectId,input:{memoryClass:"specific",semanticRole:"episode",text:"Research on Rust ownership",epistemicClass:"observed",observedAt:now,evidence:[{reference:{kind:"occurrence",value:observation.occurrenceId},supportRole:"direct"}]}});
+  const memory=await client.memory.form({subjectId,input:{memoryClass:"specific",semanticRole:"episode",text:"Research on Rust ownership",epistemicClass:"observed",evidence:[{reference:{kind:"occurrence",value:observation.occurrenceId},supportRole:"direct"}]}});
   const binding=await client.identity.bind({subjectId,canonical:{kind:"memory",value:memory.memoryId}});
   const results=await client.cognition.recall(subjectId,`@ref(${binding.lexicalRef}) $memory`);
   expect(results.hits.some(h=>h.ref===binding.lexicalRef)).toBe(true);

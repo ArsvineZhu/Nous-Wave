@@ -35,6 +35,7 @@ pub struct MemoryObject {
     pub current_revision_id: MemoryRevisionId,
     pub created_at: DateTime<Utc>,
     pub status: MemoryStatus,
+    pub accessibility_mode: AccessibilityMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,21 +58,18 @@ pub struct MemoryRevision {
     pub representation_text: String,
     pub attributes: serde_json::Value,
     pub epistemic_class: EpistemicClass,
-    pub confidence: Option<f64>,
-    pub occurred_at: Option<DateTime<Utc>>,
-    pub observed_at: DateTime<Utc>,
     pub valid_from: Option<DateTime<Utc>>,
     pub valid_to: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
-    pub supersession_state: SupersessionState,
+    pub revision_lifecycle: RevisionLifecycle,
+    pub revision_intent: Option<RevisionIntent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SupersessionState {
+pub enum RevisionLifecycle {
     Current,
     Superseded,
-    Contradicted,
     Revoked,
 }
 
@@ -124,7 +122,6 @@ pub struct MemoryRevisionEvidence {
     pub evidence_no: i32,
     pub evidence: EvidenceRef,
     pub support_role: SupportRole,
-    pub weight: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,11 +292,9 @@ pub struct MemoryFormationProposal {
     pub evidence: Vec<MemoryRevisionEvidence>,
     pub entity_refs: Vec<EntityRef>,
     pub tag_proposals: Vec<TagProposal>,
-    pub occurred_at: Option<DateTime<Utc>>,
     pub valid_from: Option<DateTime<Utc>>,
     pub valid_to: Option<DateTime<Utc>>,
     pub epistemic_class: EpistemicClass,
-    pub confidence: Option<f64>,
 }
 
 impl MemoryFormationProposal {
@@ -314,12 +309,11 @@ impl MemoryFormationProposal {
             &self.representation_text,
             self.valid_from,
             self.valid_to,
-            self.confidence,
         )?;
         if self
             .tag_proposals
             .iter()
-            .any(|tag| tag.label.trim().is_empty() || tag.label.len() > 256)
+            .any(|tag| match tag {TagProposal::Existing{..}=>false,TagProposal::New{label,..}=>label.trim().is_empty()||label.len()>256})
         {
             return Err(Error::Invalid("Tag proposal label is invalid".into()));
         }
@@ -328,10 +322,10 @@ impl MemoryFormationProposal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TagProposal {
-    pub label: String,
-    pub description: Option<String>,
-    pub kind_hint: Option<String>,
+#[serde(tag="kind",rename_all="snake_case")]
+pub enum TagProposal {
+    Existing{tag_id:TagId},
+    New{label:String,description:Option<String>,kind_hint:Option<String>},
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,12 +344,9 @@ pub struct ExplicitMemoryInput {
     pub tags: Vec<TagId>,
     #[serde(default)]
     pub tag_order_provenance: Option<serde_json::Value>,
-    pub occurred_at: Option<DateTime<Utc>>,
-    pub observed_at: DateTime<Utc>,
     pub valid_from: Option<DateTime<Utc>>,
     pub valid_to: Option<DateTime<Utc>>,
     pub epistemic_class: EpistemicClass,
-    pub confidence: Option<f64>,
 }
 
 impl ExplicitMemoryInput {
@@ -365,7 +356,6 @@ impl ExplicitMemoryInput {
             &self.representation_text,
             self.valid_from,
             self.valid_to,
-            self.confidence,
         )?;
         if self.evidence.is_empty() {
             return Err(Error::Invalid(
@@ -380,15 +370,6 @@ impl ExplicitMemoryInput {
                 "evidence_no values must be unique and non-negative".into(),
             ));
         }
-        if self.evidence.iter().any(|evidence| {
-            evidence
-                .weight
-                .is_some_and(|weight| !weight.is_finite() || weight < 0.0)
-        }) {
-            return Err(Error::Invalid(
-                "evidence weight must be finite and non-negative".into(),
-            ));
-        }
         Ok(())
     }
 }
@@ -398,7 +379,6 @@ fn validate_memory_fields(
     representation_text: &str,
     valid_from: Option<DateTime<Utc>>,
     valid_to: Option<DateTime<Utc>>,
-    confidence: Option<f64>,
 ) -> Result<()> {
     if semantic_role.trim().is_empty() || semantic_role.len() > 128 {
         return Err(Error::Invalid(
@@ -414,9 +394,6 @@ fn validate_memory_fields(
         && start > end
     {
         return Err(Error::Invalid("valid_to precedes valid_from".into()));
-    }
-    if confidence.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
-        return Err(Error::Invalid("confidence must be within [0,1]".into()));
     }
     Ok(())
 }
@@ -502,6 +479,9 @@ pub struct TopologyAssociationProposal {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopologyRevisionProposal {
+    pub expected_head_revision: i64,
+    pub intent: RevisionIntent,
+    pub entity_refs: Vec<EntityRef>,
     pub memory_id: MemoryId,
     pub representation_text: String,
     #[serde(default)]
@@ -509,16 +489,11 @@ pub struct TopologyRevisionProposal {
     #[serde(default)]
     pub title: Option<String>,
     pub evidence: Vec<MemoryRevisionEvidence>,
-    pub relation: MemoryRelation,
-    #[serde(default)]
-    pub occurred_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub valid_from: Option<DateTime<Utc>>,
     #[serde(default)]
     pub valid_to: Option<DateTime<Utc>>,
     pub epistemic_class: EpistemicClass,
-    #[serde(default)]
-    pub confidence: Option<f64>,
 }
 
 #[cfg(test)]
@@ -537,12 +512,9 @@ mod tests {
             entity_refs: Vec::new(),
             tags: Vec::new(),
             tag_order_provenance: None,
-            occurred_at: None,
-            observed_at: Utc::now(),
             valid_from: None,
             valid_to: None,
             epistemic_class: EpistemicClass::Reported,
-            confidence: None,
         };
         assert!(input.validate().is_err());
     }
@@ -552,4 +524,21 @@ mod tests {
         let target: ConsolidationTarget = serde_json::from_str("\"integrative\"").expect("target");
         assert!(matches!(target, ConsolidationTarget::Integrative));
     }
+}
+
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="snake_case")]
+pub enum RevisionIntent {Correct,Rephrase,Reinterpret,Revoke}
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize,Default)]
+#[serde(rename_all="snake_case")]
+pub enum AccessibilityMode {#[default] Auto,Normal,Deep,Explicit}
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="snake_case")]
+pub enum AccessibilityLevel {Normal,Deep,Explicit}
+#[derive(Debug,Clone,Serialize,Deserialize,Default)]
+pub struct TemporalEvidence {
+    pub occurred_min:Option<DateTime<Utc>>,
+    pub occurred_max:Option<DateTime<Utc>>,
+    pub observed_min:Option<DateTime<Utc>>,
+    pub observed_max:Option<DateTime<Utc>>,
 }

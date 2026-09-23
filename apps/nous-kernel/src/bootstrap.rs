@@ -9,6 +9,8 @@ use std::{
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    #[serde(default)]
+    accessibility:nous_memory_service::AccessibilityPolicy,
     stored_embedding: Option<nous_serving::StoredEmbeddingConfig>,
     server: ServerConfig,
     #[serde(default = "default_true")]
@@ -138,6 +140,7 @@ pub async fn open(path: &Path) -> Result<(NousRuntime, Option<PostgreSQL>)> {
         .ok_or_else(|| Error::Invalid("config parent required".into()))?;
     let (postgres_url, managed) = open_database(root, &config.database).await?;
     let result = NousRuntime::open(RuntimeOptions {
+        accessibility_policy:config.accessibility,
         postgres_url,
         max_connections: config.database.max_connections,
         object_root: resolve_path(root, &config.object_store.root)

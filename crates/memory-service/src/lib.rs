@@ -1,6 +1,8 @@
 //! Application orchestration for the first Nous Wave production wave.
 
 mod support;
+mod accessibility;
+pub use accessibility::{AccessibilityPolicy,eligible as accessibility_eligible};
 
 use chrono::{DateTime, Utc};
 use nous_authority_store::AuthorityStore;
@@ -31,6 +33,7 @@ use nous_serving::TextEmbeddingRequest;
 
 #[derive(Clone)]
 pub struct MemoryService {
+    pub accessibility_policy: AccessibilityPolicy,
     pub store: AuthorityStore,
     pub objects: ObjectStore,
     pub serving: nous_serving::ServingService,
@@ -51,6 +54,10 @@ pub struct RuntimeStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryView {
+    pub temporal_evidence: TemporalEvidence,
+    pub accessibility_level:AccessibilityLevel,
+    pub relations:Vec<MemoryRevisionRelation>,
+    pub relations_truncated:bool,
     pub object: MemoryObject,
     pub revision: MemoryRevision,
     pub evidence: Vec<MemoryRevisionEvidence>,
@@ -66,6 +73,8 @@ pub struct ConsolidationResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviseMemoryInput {
+    pub intent: RevisionIntent,
+    pub entity_refs: Vec<EntityRef>,
     pub expected_head_revision: i64,
     #[serde(default)]
     pub subject: SubjectId,
@@ -75,12 +84,9 @@ pub struct ReviseMemoryInput {
     pub semantic_role: Option<String>,
     pub title: Option<String>,
     pub evidence: Vec<MemoryRevisionEvidence>,
-    pub relation: MemoryRelation,
-    pub occurred_at: Option<DateTime<Utc>>,
     pub valid_from: Option<DateTime<Utc>>,
     pub valid_to: Option<DateTime<Utc>>,
     pub epistemic_class: EpistemicClass,
-    pub confidence: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +144,8 @@ pub struct RebindEntityRequest {
 }
 
 mod memory;
+mod temporal;
+mod relations;
 mod memory_lifecycle;
 mod memory_support;
 mod query;

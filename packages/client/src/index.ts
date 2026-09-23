@@ -52,12 +52,12 @@ export function createNousClient(transport: Transport) {
       recall: async (subjectId:string,nousql:string,options?:RequestOptions) => {
         const result=await call(cognition.query)({subjectId,nousql},options);
         return {status:result.status,boundQuery:result.boundQuery,degradation:result.degradation,
-          hits:result.hits.map(h=>({ref:h.lexicalRef,text:h.text,authority:h.authority,evidenceFamilies:h.evidenceFamilies}))};
+          hits:result.hits.map(h=>({ref:h.lexicalRef,text:h.text,authority:h.authority,evidenceFamilies:h.evidenceFamilies,revisionLifecycle:h.revisionLifecycle}))};
       },
       mutateFocus: call(cognition.mutateFocus), getFocus: call(cognition.getFocus), listFocuses: call(cognition.listFocuses),
       project: call(cognition.buildProjection), managedContext: call(cognition.buildManagedContext),
     },
-    memory: { get: call(memory.getMemory), list: call(memory.listMemories), revision: call(memory.getMemoryRevision), history: call(memory.listMemoryRevisions),
+    memory: { setAccessibility:call(memory.setAccessibility),linkRevisions:call(memory.linkRevisions),get: call(memory.getMemory), list: call(memory.listMemories), revision: call(memory.getMemoryRevision), history: call(memory.listMemoryRevisions),
       form: call(memory.formMemory), revise: call(memory.reviseMemory), suppress: call(memory.suppressMemory), restore: call(memory.restoreMemory), purge: call(memory.purgeMemory),consolidate:call(memory.consolidateMemory) },
     material: { getArtifact: call(material.getArtifact), listArtifacts: call(material.listArtifacts), materialize: call(material.materializeEvidence),occurrence:call(material.getOccurrence),sourceRegion:call(material.getSourceRegion),representation:call(material.getDerivedRepresentation) },
   };

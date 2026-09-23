@@ -20,7 +20,7 @@ use nous_material_service::{
 };
 use nous_memory_domain::{
     AssociationPolarity, AssociationSupportClass, ConsolidationRequest, ConsolidationTarget,
-    EvidenceRef, ExplicitMemoryInput, MemoryClass, MemoryRelation, MemoryRevisionEvidence,
+    EvidenceRef, ExplicitMemoryInput, MemoryClass, MemoryRevisionEvidence,
     SupportRole, TopologyAnchorProposal, TopologyAnchorSupport, TopologyAssociationProposal,
     TopologyConsolidationProposal, TopologyRevisionProposal, TopologyTagProposal,
 };
@@ -32,6 +32,83 @@ use postgresql_embedded::{PostgreSQL, SettingsBuilder, VersionReq};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
+
+fn semantic_memory_input(subject:SubjectId,occurrence:nous_core::OccurrenceId,text:&str)->ExplicitMemoryInput {
+    ExplicitMemoryInput{subject,memory_class:MemoryClass::Specific,semantic_role:"episode".into(),representation_text:text.into(),title:None,
+        evidence:vec![MemoryRevisionEvidence{evidence_no:0,evidence:EvidenceRef::Occurrence{occurrence_id:occurrence},support_role:SupportRole::Direct}],
+        entity_refs:vec![],tags:vec![],tag_order_provenance:None,valid_from:None,valid_to:None,epistemic_class:nous_core::EpistemicClass::Observed}
+}
+fn semantic_memory_query(subject:SubjectId,effort:nous_core::CognitiveEffort)->CognitiveQuery {
+    CognitiveQuery{api_version:API_VERSION,subject,session:None,situation:Default::default(),targets:vec![nous_core::QueryTarget::Memory],cues:vec![Cue::Text(TextCue{text:"event".into()})],constraints:Default::default(),exploration:Default::default(),resources:Default::default(),result_need:Default::default(),effort,capabilities:Default::default(),diagnostics:Default::default()}
+}
+async fn semantic_observation(runtime:&NousRuntime,subject:SubjectId,when:chrono::DateTime<Utc>)->nous_material::AcceptedObservation {
+    runtime.material.record_observation(ObservationInput{subject,session:None,occurrence:OccurrenceDescriptor{source_class:SourceClass::Message,external_object_ref:None,occurred_at:Some(when),observed_at:when,conversation_ref:None,actor_entity_ref:None,context:serde_json::json!({})},material:ObservationMaterial::InlineText{text:"event with no named participant".into(),media_type:"text/plain".into()},entities:vec![],runtime:RuntimeDirective::default()}).await.expect("observation")
+}
+
+#[tokio::test]
+async fn semantic_closure_lineage_does_not_fabricate_mentions_times_or_identity_merges(){
+    use nous_memory_domain::{RevisionLifecycle,MemoryFormationProposal,TagProposal};
+    let (postgres,url,root)=database().await;let runtime=open_runtime(&url,&root,true,None).await;
+    let subject=runtime.subjects.create_subject(seed_input()).await.unwrap().subject_id;
+    let early=chrono::DateTime::from_timestamp_micros((Utc::now()-chrono::Duration::days(50)).timestamp_micros()).unwrap();let late=chrono::DateTime::from_timestamp_micros((Utc::now()-chrono::Duration::days(10)).timestamp_micros()).unwrap();
+    let first=semantic_observation(&runtime,subject,early).await;let second=semantic_observation(&runtime,subject,late).await;
+    let memory=runtime.require_memory().unwrap();
+    let mut input=semantic_memory_input(subject,first.occurrence.occurrence_id,"event reported as Friday");
+    input.entity_refs=vec![EntityRef::new("entity:test:alice").unwrap()];
+    input.evidence.push(MemoryRevisionEvidence{evidence_no:1,evidence:EvidenceRef::Occurrence{occurrence_id:second.occurrence.occurrence_id},support_role:SupportRole::Contradiction});
+    let m1=memory.form_memory(input).await.unwrap();
+    let count:i64=sqlx::query_scalar("SELECT count(*) FROM entity_mentions WHERE subject_id=$1").bind(subject.0).fetch_one(runtime.store.pool()).await.unwrap();
+    assert_eq!(count,0);assert_eq!(m1.entities.len(),1);
+    assert_eq!(m1.temporal_evidence.observed_min,Some(early));assert_eq!(m1.temporal_evidence.observed_max,Some(late));
+    let m2=memory.form_memory(semantic_memory_input(subject,second.occurrence.occurrence_id,"event reported as Thursday")).await.unwrap();
+    memory.link_revisions(subject,m2.revision.memory_revision_id,m1.revision.memory_revision_id,nous_memory_domain::MemoryRelation::Contradicts).await.unwrap();
+    let m1=memory.memory(subject,m1.object.memory_id,None).await.unwrap();
+    assert_eq!(m1.revision.revision_lifecycle,RevisionLifecycle::Current);
+    assert!(m1.relations.iter().any(|r|r.relation==nous_memory_domain::MemoryRelation::Contradicts));
+    let mut query=semantic_memory_query(subject,nous_core::CognitiveEffort::Normal);
+    query.constraints.observed=Some(nous_core::TimeInterval{start:Some(early+chrono::Duration::days(10)),end:Some(late-chrono::Duration::days(10))});
+    assert!(runtime.query(query.clone()).await.unwrap().results.is_empty(),"aggregate ranges must not fill a gap in actual encounters");
+    query.constraints.observed=Some(nous_core::TimeInterval{start:Some(late-chrono::Duration::minutes(1)),end:Some(late+chrono::Duration::minutes(1))});
+    query.constraints.occurred=Some(nous_core::TimeInterval{start:Some(early-chrono::Duration::minutes(1)),end:Some(early+chrono::Duration::minutes(1))});
+    assert!(runtime.query(query).await.unwrap().results.is_empty(),"time axes must match one encounter");
+    let proposal=||MemoryFormationProposal{memory_class:MemoryClass::Specific,semantic_role:"episode".into(),representation_text:"event with proposed tag".into(),title:None,evidence:m1.evidence.clone(),entity_refs:vec![],tag_proposals:vec![TagProposal::New{label:"school".into(),description:None,kind_hint:None}],valid_from:None,valid_to:None,epistemic_class:nous_core::EpistemicClass::Derived};
+    let tagged1=memory.commit_formation_proposal(subject,proposal(),&[]).await.unwrap();
+    let tagged2=memory.commit_formation_proposal(subject,proposal(),&[]).await.unwrap();
+    assert_ne!(tagged1.tags,tagged2.tags,"a shared label is not a shared Tag identity");
+    runtime.store.close().await;postgres.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn semantic_closure_accessibility_changes_recall_without_changing_authority_or_truth(){
+    use nous_memory_domain::{AccessibilityMode as Mode,AccessibilityLevel as Level};
+    use nous_core::CognitiveEffort as Effort;
+    let (postgres,url,root)=database().await;let runtime=open_runtime(&url,&root,true,None).await;
+    let subject=runtime.subjects.create_subject(seed_input()).await.unwrap().subject_id;
+    let observation=semantic_observation(&runtime,subject,Utc::now()).await;let memory=runtime.require_memory().unwrap();
+    let formed=memory.form_memory(semantic_memory_input(subject,observation.occurrence.occurrence_id,"event accessibility fixture")).await.unwrap();
+    let deep=memory.set_accessibility(subject,formed.object.memory_id,formed.object.head_revision,Mode::Deep).await.unwrap();
+    assert!(runtime.query(semantic_memory_query(subject,Effort::Normal)).await.unwrap().results.is_empty());
+    assert_eq!(runtime.query(semantic_memory_query(subject,Effort::Deep)).await.unwrap().results.len(),1);
+    let explicit=memory.set_accessibility(subject,deep.object.memory_id,deep.object.head_revision,Mode::Explicit).await.unwrap();
+    assert!(runtime.query(semantic_memory_query(subject,Effort::Maximum)).await.unwrap().results.is_empty());
+    let mut exact=semantic_memory_query(subject,Effort::Light);exact.cues.clear();exact.targets=vec![nous_core::QueryTarget::Exact{reference:CognitiveRef::Memory(explicit.object.memory_id)}];
+    assert_eq!(runtime.query(exact.clone()).await.unwrap().results.len(),1);
+    let suppressed=memory.suppress(subject,explicit.object.memory_id,explicit.object.head_revision).await.unwrap();
+    assert!(runtime.query(exact).await.unwrap().results.is_empty(),"exact recall cannot bypass suppression");
+    let restored=memory.restore(subject,suppressed.object.memory_id,suppressed.object.head_revision).await.unwrap();
+    let auto=memory.set_accessibility(subject,restored.object.memory_id,restored.object.head_revision,Mode::Auto).await.unwrap();
+    sqlx::query("UPDATE memory_objects SET created_at=now()-interval '400 days' WHERE memory_id=$1").bind(auto.object.memory_id.0).execute(runtime.store.pool()).await.unwrap();
+    assert_eq!(memory.accessibility_level(subject,auto.object.memory_id,Utc::now()).await.unwrap(),Level::Explicit);
+    let feedback=|kind|UseFeedback{subject,session_id:None,consumer:Some("semantic-test".into()),events:vec![UseFeedbackEvent{reference:CognitiveRef::MemoryRevision(auto.revision.memory_revision_id),use_kind:kind,context:serde_json::json!({})}]};
+    runtime.cognition.use_feedback(feedback(UseKind::Exposed)).await.unwrap();
+    assert_eq!(memory.accessibility_level(subject,auto.object.memory_id,Utc::now()).await.unwrap(),Level::Explicit);
+    runtime.cognition.use_feedback(feedback(UseKind::Referenced)).await.unwrap();
+    assert_eq!(memory.accessibility_level(subject,auto.object.memory_id,Utc::now()).await.unwrap(),Level::Normal);
+    let after=memory.memory(subject,auto.object.memory_id,None).await.unwrap();
+    assert_eq!(after.revision.memory_revision_id,formed.revision.memory_revision_id);
+    assert_eq!(after.revision.representation_text,formed.revision.representation_text);
+    runtime.store.close().await;postgres.stop().await.unwrap();
+}
 
 struct TestExtractor {
     producer: ProducerSignature,
@@ -500,17 +577,13 @@ async fn same_artifact_keeps_distinct_occurrences_and_use_is_explicit() {
                     occurrence_id: first.occurrence.occurrence_id,
                 },
                 support_role: SupportRole::Direct,
-                weight: Some(1.0),
             }],
             entity_refs: Vec::new(),
             tags: Vec::new(),
             tag_order_provenance: None,
-            occurred_at: None,
-            observed_at: Utc::now(),
             valid_from: None,
             valid_to: None,
             epistemic_class: nous_core::EpistemicClass::Observed,
-            confidence: None,
         })
         .await
         .expect("explicit memory");
@@ -652,17 +725,13 @@ async fn query_uses_rebuilt_entity_tag_and_lexical_projections() {
                     occurrence_id: observed.occurrence.occurrence_id,
                 },
                 support_role: SupportRole::Direct,
-                weight: Some(1.0),
             }],
             entity_refs: vec![entity.clone()],
             tags: vec![tag.tag_id],
             tag_order_provenance: None,
-            occurred_at: None,
-            observed_at: Utc::now(),
             valid_from: None,
             valid_to: None,
             epistemic_class: nous_core::EpistemicClass::Reported,
-            confidence: Some(0.9),
         })
         .await
         .expect("memory");
@@ -815,17 +884,13 @@ async fn field_dense_only_candidate_enters_final_results() {
                     occurrence_id: observed.occurrence.occurrence_id,
                 },
                 support_role: SupportRole::Direct,
-                weight: Some(1.0),
             }],
             entity_refs: Vec::new(),
             tags: vec![tag.tag_id],
             tag_order_provenance: None,
-            occurred_at: None,
-            observed_at: Utc::now(),
             valid_from: None,
             valid_to: None,
             epistemic_class: nous_core::EpistemicClass::Reported,
-            confidence: None,
         })
         .await
         .expect("candidate memory");
@@ -845,17 +910,13 @@ async fn field_dense_only_candidate_enters_final_results() {
                         occurrence_id: observed.occurrence.occurrence_id,
                     },
                     support_role: SupportRole::Direct,
-                    weight: Some(1.0),
                 }],
                 entity_refs: Vec::new(),
                 tags: Vec::new(),
                 tag_order_provenance: None,
-                occurred_at: None,
-                observed_at: Utc::now(),
                 valid_from: None,
                 valid_to: None,
                 epistemic_class: nous_core::EpistemicClass::Reported,
-                confidence: None,
             })
             .await
             .expect("noise memory");
@@ -1009,17 +1070,13 @@ async fn topology_only_consolidation_proposal_is_validated_and_atomic() {
                 occurrence_id: observed.occurrence.occurrence_id,
             },
             support_role: SupportRole::Direct,
-            weight: Some(1.0),
         }],
         entity_refs: Vec::new(),
         tags: Vec::new(),
         tag_order_provenance: None,
-        occurred_at: None,
-        observed_at: Utc::now(),
         valid_from: None,
         valid_to: None,
         epistemic_class: nous_core::EpistemicClass::Observed,
-        confidence: None,
     };
     let first = runtime
         .require_memory()
@@ -1134,12 +1191,12 @@ async fn topology_only_consolidation_proposal_is_validated_and_atomic() {
                 semantic_role: Some("revised".into()),
                 title: None,
                 evidence: first.evidence.clone(),
-                relation: MemoryRelation::Supersedes,
-                occurred_at: None,
+                expected_head_revision:first.object.head_revision,
+                intent:nous_memory_domain::RevisionIntent::Reinterpret,
+                entity_refs:first.entities.clone(),
                 valid_from: None,
                 valid_to: None,
                 epistemic_class: nous_core::EpistemicClass::Observed,
-                confidence: None,
             }],
         }),
     };
@@ -1272,17 +1329,13 @@ async fn purge_respects_reachability_for_derived_representations() {
                 derived_representation_id: nous_core::DerivedRepresentationId(derived_id),
             },
             support_role: SupportRole::Direct,
-            weight: Some(1.0),
         }],
         entity_refs: Vec::new(),
         tags: Vec::new(),
         tag_order_provenance: None,
-        occurred_at: None,
-        observed_at: Utc::now(),
         valid_from: None,
         valid_to: None,
         epistemic_class: nous_core::EpistemicClass::Observed,
-        confidence: None,
     };
     let first = runtime
         .require_memory()
@@ -2022,6 +2075,7 @@ async fn open_runtime(
     embedding: Option<Arc<dyn TextEmbeddingProvider>>,
 ) -> NousRuntime {
     NousRuntime::open(RuntimeOptions {
+        accessibility_policy:Default::default(),
         stored_embedding: None,
         postgres_url: url.into(),
         max_connections: 4,

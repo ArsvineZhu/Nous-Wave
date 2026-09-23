@@ -24,6 +24,8 @@ GUI、远程多用户、Persona/Relationship 等未来认知域、分布式检�
 
 ## 执行顺序与证明
 
+2026-09-17 补充：用户要求参考“重新复述结果”中的审查继续开发。经源码核对，将 [Memory 语义合同](MEMORY.md) 纳入当前执行范围；先修正 Authority 时间、修订、实体关联、无定义数值、拓扑身份和可访问性，再进行最终验收。既有 Core/Client 和 Host/Kernel 工作继续保留。
+
 - 协议、工具链、Kernel/Core 进程及认证链。
 - 管理与材料操作 parity、请求幂等与并发 fencing；随后删除旧公开入口。
 - Focus/checkpoint、确定性 Projection、Context、身份绑定与 NousQL。

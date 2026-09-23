@@ -10,6 +10,7 @@ impl ContextResolver for NousRuntime {
         subject: SubjectId,
         reference: &CognitiveRef,
         max_bytes: usize,
+        explicit: bool,
     ) -> Result<ContextSource> {
         let memory = match reference {
             CognitiveRef::Memory(id) => {
@@ -21,6 +22,10 @@ impl ContextResolver for NousRuntime {
             _ => None,
         };
         if let Some(memory) = memory {
+            if memory.object.status!=nous_memory_domain::MemoryStatus::Active||memory.revision.revision_lifecycle==nous_memory_domain::RevisionLifecycle::Revoked{return Err(Error::Unavailable("Memory is suppressed".into()));}
+            let level=self.require_memory()?.accessibility_level(subject,memory.object.memory_id,chrono::Utc::now()).await?;
+            if !nous_memory_service::accessibility_eligible(level,CognitiveEffort::Normal,explicit,false){return Err(Error::Unavailable("Memory accessibility requires deeper or explicit recall".into()));}
+
             let evidence = memory
                 .evidence
                 .iter()

@@ -42,6 +42,8 @@ service ArtifactStreamService {
 }
 
 service AuthorityService {
+  rpc SetAccessibility(nous.wave.v1alpha1.SetAccessibilityRequest) returns (nous.wave.v1alpha1.Memory);
+  rpc LinkRevisions(nous.wave.v1alpha1.LinkRevisionsRequest) returns (google.protobuf.Empty);
   rpc PutResource(nous.wave.v1alpha1.PutResourceRequest) returns (nous.wave.v1alpha1.ResourceDescriptor);
   rpc GetResource(nous.wave.v1alpha1.ObjectRequest) returns (nous.wave.v1alpha1.ResourceDescriptor);
   rpc ListResources(nous.wave.v1alpha1.ListRequest) returns (nous.wave.v1alpha1.ListResourcesResponse);
@@ -57,7 +59,7 @@ service AuthorityService {
   rpc RebindEntity(nous.wave.v1alpha1.RebindEntityRequest) returns (google.protobuf.Empty);
   rpc GetStatus(google.protobuf.Empty) returns (nous.wave.v1alpha1.SystemStatus);
   rpc GetProjectionStatus(nous.wave.v1alpha1.SubjectRequest) returns (nous.wave.v1alpha1.ProjectionStatus);
-  rpc ConsolidateMemory(nous.wave.v1alpha1.ConsolidateMemoryRequest) returns (nous.wave.v1alpha1.Memory);
+  rpc ConsolidateMemory(nous.wave.v1alpha1.ConsolidateMemoryRequest) returns (nous.wave.v1alpha1.ConsolidationResponse);
   rpc GetOccurrence(nous.wave.v1alpha1.ObjectRequest) returns (nous.wave.v1alpha1.Occurrence);
   rpc GetSourceRegion(nous.wave.v1alpha1.ObjectRequest) returns (nous.wave.v1alpha1.SourceRegion);
   rpc GetDerivedRepresentation(nous.wave.v1alpha1.ObjectRequest) returns (nous.wave.v1alpha1.DerivedRepresentation);

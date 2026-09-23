@@ -215,7 +215,7 @@ pub(super) fn exact_hit(
         } else {
             Vec::new()
         },
-        supersession_state: None,
+        revision_lifecycle: None,
     })
 }
 

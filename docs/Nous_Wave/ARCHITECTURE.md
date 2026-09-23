@@ -102,9 +102,11 @@ Memory must not own Subject Core or generic Cognitive Runtime.
 
 ### 3.4 Future cognitive MicroSystems
 
-Persona/Self, Social, Epistemic, Goals/Commitments, Reflection, Diary and Dream/Simulation are FUTURE.
+Persona/Self, Social, Epistemic, Affect, Motivation, group language conventions and related cognition are outside Memory Authority. Their eventual product/physical ownership remains OPEN.
 
 Only cross-MicroSystem boundaries may exist now.
+
+The active Memory semantic contract is [MEMORY.md](MEMORY.md); its implementation is part of the current Architecture Rebase.
 
 Do not create empty placeholder crates.
 

@@ -2,6 +2,9 @@ use super::*;
 
 #[tonic::async_trait]
 impl k::authority_service_server::AuthorityService for KernelService {
+    async fn set_accessibility(&self,request:Request<p::SetAccessibilityRequest>)->std::result::Result<Response<p::Memory>,Status>{KernelService::set_accessibility(self,request.into_inner()).await.map(Response::new).map_err(status)}
+    async fn link_revisions(&self,request:Request<p::LinkRevisionsRequest>)->std::result::Result<Response<()>,Status>{KernelService::link_revisions(self,request.into_inner()).await.map(Response::new).map_err(status)}
+
     async fn put_resource(
         &self,
         request: Request<p::PutResourceRequest>,
@@ -140,7 +143,7 @@ impl k::authority_service_server::AuthorityService for KernelService {
     async fn consolidate_memory(
         &self,
         request: Request<p::ConsolidateMemoryRequest>,
-    ) -> std::result::Result<Response<p::Memory>, Status> {
+    ) -> std::result::Result<Response<p::ConsolidationResponse>, Status> {
         KernelService::consolidate_memory(self, request.into_inner())
             .await
             .map(Response::new)

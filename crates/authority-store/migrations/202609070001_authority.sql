@@ -164,13 +164,10 @@ CREATE TABLE memory_revisions (
     representation_text text NOT NULL,
     attributes jsonb NOT NULL DEFAULT '{}',
     epistemic_class text NOT NULL,
-    confidence double precision NULL CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
-    occurred_at timestamptz NULL,
-    observed_at timestamptz NOT NULL,
     valid_from timestamptz NULL,
     valid_to timestamptz NULL,
     created_at timestamptz NOT NULL,
-    supersession_state text NOT NULL CHECK (supersession_state IN ('current','superseded','contradicted','revoked')),
+    revision_lifecycle text NOT NULL CHECK (revision_lifecycle IN ('current','superseded','revoked')),
     UNIQUE(memory_id, revision_no),
     CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from)
 );
@@ -188,7 +185,6 @@ CREATE TABLE memory_revision_evidence (
     derived_representation_id uuid NULL REFERENCES derived_representations(derived_representation_id) ON DELETE CASCADE,
     derived_region_id uuid NULL REFERENCES derived_regions(derived_region_id) ON DELETE CASCADE,
     support_role text NOT NULL CHECK (support_role IN ('direct','corroborating','interpretation','contradiction','contextual')),
-    weight double precision NULL CHECK (weight IS NULL OR weight = weight),
     PRIMARY KEY(memory_revision_id, evidence_no),
     CHECK (num_nonnulls(occurrence_id, source_region_id, derived_representation_id, derived_region_id) = 1)
 );
@@ -298,7 +294,7 @@ CREATE TABLE association_evidence (
     association_kind text NOT NULL,
     polarity text NOT NULL CHECK (polarity IN ('positive','negative')),
     support_class text NOT NULL CHECK (support_class IN ('host_explicit','memory_evidence','consolidation','meaningful_use','derived_structure')),
-    support_value double precision NOT NULL CHECK (support_value >= 0),
+    support_value double precision NOT NULL CHECK (support_value >= 0 AND support_value <= 1),
     occurrence_id uuid NULL REFERENCES observation_occurrences(occurrence_id) ON DELETE CASCADE,
     memory_revision_id uuid NULL REFERENCES memory_revisions(memory_revision_id) ON DELETE CASCADE,
     producer_signature_id uuid NULL REFERENCES producer_signatures(producer_signature_id),
@@ -378,7 +374,7 @@ CREATE TABLE serving_current (
     PRIMARY KEY(subject_id, kind, space_signature)
 );
 CREATE INDEX memory_revisions_subject_time_idx
-    ON memory_revisions(subject_id, observed_at DESC);
+    ON memory_revisions(subject_id, created_at DESC);
 CREATE INDEX memory_revision_evidence_occurrence_idx
     ON memory_revision_evidence(occurrence_id);
 CREATE INDEX entity_binding_current_lookup_idx

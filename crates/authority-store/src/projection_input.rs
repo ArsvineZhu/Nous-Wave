@@ -73,12 +73,12 @@ pub(crate) async fn memory_sources(
     tx: &mut Transaction<'_, Postgres>,
     subject: SubjectId,
 ) -> Result<Vec<TextProjectionSource>> {
-    let rows = sqlx::query("SELECT o.memory_id,r.memory_revision_id,r.representation_text,r.title FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND o.status='active' ORDER BY o.memory_id")
+    let rows = sqlx::query("SELECT o.memory_id,r.memory_revision_id,r.representation_text,r.title FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND o.status='active' AND r.revision_lifecycle='current' ORDER BY o.memory_id")
         .bind(subject.0).fetch_all(&mut **tx).await.map_err(db)?;
     let mut sources = Vec::new();
     for row in rows {
         let revision: Uuid = row.try_get("memory_revision_id").map_err(db)?;
-        let entities = sqlx::query_scalar("SELECT DISTINCT b.entity_ref FROM memory_revision_evidence e JOIN entity_mentions m ON (m.occurrence_id=e.occurrence_id OR m.source_region_id=e.source_region_id OR m.derived_region_id=e.derived_region_id) JOIN entity_binding_revisions b ON b.mention_id=m.mention_id WHERE e.memory_revision_id=$1 AND b.revision_no=(SELECT max(b2.revision_no) FROM entity_binding_revisions b2 WHERE b2.mention_id=b.mention_id) AND b.binding_state='bound' AND b.entity_ref IS NOT NULL ORDER BY b.entity_ref")
+        let entities = sqlx::query_scalar("SELECT DISTINCT entity_ref FROM memory_revision_entities WHERE memory_revision_id=$1 ORDER BY entity_ref")
             .bind(revision).fetch_all(&mut **tx).await.map_err(db)?;
         let tags = sqlx::query_scalar("SELECT tag_id::text FROM memory_revision_tags WHERE memory_revision_id=$1 ORDER BY tag_id")
             .bind(revision).fetch_all(&mut **tx).await.map_err(db)?;

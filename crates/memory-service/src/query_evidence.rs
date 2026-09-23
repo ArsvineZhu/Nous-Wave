@@ -118,7 +118,7 @@ impl MemoryService {
                     } else {
                         Vec::new()
                     },
-                    supersession_state: None,
+                    revision_lifecycle: None,
                 });
                 result_references.insert(reference);
                 if results.len() >= query.result_need.limit {
@@ -232,7 +232,7 @@ impl MemoryService {
                     } else {
                         Vec::new()
                     },
-                    supersession_state: None,
+                    revision_lifecycle: None,
                 });
                 result_references.insert(reference);
             }
@@ -364,7 +364,7 @@ impl MemoryService {
                     } else {
                         Vec::new()
                     },
-                    supersession_state: None,
+                    revision_lifecycle: None,
                 });
                 result_references.insert(reference);
             }
@@ -470,7 +470,7 @@ impl MemoryService {
                     } else {
                         Vec::new()
                     },
-                    supersession_state: None,
+                    revision_lifecycle: None,
                 });
                 result_references.insert(reference);
             }
@@ -589,7 +589,7 @@ impl MemoryService {
                     } else {
                         Vec::new()
                     },
-                    supersession_state: None,
+                    revision_lifecycle: None,
                 });
                 result_references.insert(reference);
             }
@@ -647,7 +647,7 @@ impl MemoryService {
                         explanation: Some("resource awareness descriptor".into()),
                     },
                     materialization: Vec::new(),
-                    supersession_state: None,
+                    revision_lifecycle: None,
                 });
                 result_references.insert(reference);
                 if results.len() >= query.result_need.limit {

@@ -26,7 +26,9 @@ service CognitionService {
   rpc BuildManagedContext(ManagedContextRequest) returns (ManagedContextResponse);
 }
 service MemoryService {
-  rpc ConsolidateMemory(ConsolidateMemoryRequest) returns (Memory);
+  rpc SetAccessibility(SetAccessibilityRequest) returns (Memory);
+  rpc LinkRevisions(LinkRevisionsRequest) returns (google.protobuf.Empty);
+  rpc ConsolidateMemory(ConsolidateMemoryRequest) returns (ConsolidationResponse);
   rpc GetMemory(ObjectRequest) returns (Memory);
   rpc ListMemories(ListRequest) returns (ListMemoriesResponse);
   rpc GetMemoryRevision(ObjectRequest) returns (Memory);

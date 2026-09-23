@@ -134,6 +134,7 @@ message Hit {
   optional string lexical_ref = 8;
   optional string semantic_role = 9;
   optional string memory_class = 10;
+  optional string revision_lifecycle = 11;
 }
 message ResourceAction { string resource_ref = 1; string action = 2; string reason = 3; bool current_authority = 4; }
 message QueryResponse {
@@ -151,6 +152,23 @@ message ReportUseRequest {
   repeated UseEvent events = 4;
 }
 message UseEvent { CognitiveRef reference = 1; string kind = 2; google.protobuf.Struct context = 3; }
+message TemporalEvidence {
+  google.protobuf.Timestamp occurred_min = 1;
+  google.protobuf.Timestamp occurred_max = 2;
+  google.protobuf.Timestamp observed_min = 3;
+  google.protobuf.Timestamp observed_max = 4;
+}
+message RevisionRelation { string from_revision_id = 1; string to_revision_id = 2; string relation = 3; }
+message MemoryContent {
+  string memory_class = 1;
+  string semantic_role = 2;
+  string text = 3;
+  optional string title = 4;
+  repeated Evidence evidence = 5;
+  repeated string tags = 6;
+  TimeInterval valid = 7;
+  string epistemic_class = 8;
+}
 message Memory {
   string memory_id = 1;
   string revision_id = 2;
@@ -163,26 +181,31 @@ message Memory {
   optional string title = 9;
   repeated Evidence evidence = 10;
   repeated string tags = 11;
-  google.protobuf.Timestamp occurred_at = 12;
-  google.protobuf.Timestamp observed_at = 13;
+  google.protobuf.Timestamp created_at = 12;
+  TemporalEvidence temporal_evidence = 13;
   TimeInterval valid = 14;
   string epistemic_class = 15;
-  optional double confidence = 16;
+  string revision_lifecycle = 16;
   int32 revision_no = 17;
+  string accessibility_mode = 18;
+  string accessibility_level = 19;
+  repeated string entity_refs = 20;
+  repeated RevisionRelation relations = 21;
+  bool relations_truncated = 22;
+  optional string revision_intent = 23;
 }
 message ListMemoriesResponse { repeated Memory items = 1; string next_page_token = 2; }
-message FormMemoryRequest {
-  string subject_id = 1;
-  Memory input = 2;
-  repeated string entity_refs = 3;
-}
+message FormMemoryRequest { string subject_id = 1; MemoryContent input = 2; repeated string entity_refs = 3; }
 message ReviseMemoryRequest {
   string subject_id = 1;
   string memory_id = 2;
   string expected_etag = 3;
-  Memory input = 4;
-  optional string relation = 5;
+  MemoryContent input = 4;
+  string intent = 5;
+  repeated string entity_refs = 6;
 }
+message SetAccessibilityRequest { string subject_id = 1; string memory_id = 2; string expected_etag = 3; string mode = 4; }
+message LinkRevisionsRequest { string subject_id = 1; string from_revision_id = 2; string to_revision_id = 3; string relation = 4; }
 message MemoryMutationRequest { string subject_id = 1; string memory_id = 2; string expected_etag = 3; }
 message MemoryHistoryRequest { string subject_id = 1; string memory_id = 2; Page page = 3; }
 message Artifact {

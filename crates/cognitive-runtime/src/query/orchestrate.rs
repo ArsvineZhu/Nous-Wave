@@ -62,6 +62,7 @@ impl CognitiveRuntimeService {
             QueryTarget::Exact { reference } => Some(reference),
             _ => None,
         }) {
+            if matches!(reference,CognitiveRef::Memory(_)|CognitiveRef::MemoryRevision(_)){continue;}
             self.store
                 .validate_reference(query.subject, reference)
                 .await?;
@@ -82,6 +83,7 @@ impl CognitiveRuntimeService {
             });
         if runtime_allowed && let Some(session) = query.session {
             for resident in self.session(query.subject, session).await?.resident {
+                if matches!(resident.reference,CognitiveRef::Memory(_)|CognitiveRef::MemoryRevision(_)){continue;}
                 if seen.insert(resident.reference.clone()) {
                     result.results.push(reference_hit(
                         resident.reference,
@@ -217,6 +219,6 @@ fn reference_hit(
         } else {
             Vec::new()
         },
-        supersession_state: None,
+        revision_lifecycle: None,
     }
 }

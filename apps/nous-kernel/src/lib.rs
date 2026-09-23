@@ -24,6 +24,7 @@ pub struct NousRuntime {
 }
 
 pub struct RuntimeOptions {
+    pub accessibility_policy:nous_memory_service::AccessibilityPolicy,
     pub postgres_url: String,
     pub max_connections: u32,
     pub object_root: String,
@@ -76,8 +77,11 @@ impl NousRuntime {
                 None => options.embedding,
             },
         )?;
+        let accessibility_policy=options.accessibility_policy.validate()?;
         let memory = options.memory_enabled.then(|| {
-            MemoryService::new(store.clone(), objects, cognition.clone(), serving.clone())
+            let mut memory=MemoryService::new(store.clone(), objects, cognition.clone(), serving.clone());
+            memory.accessibility_policy=accessibility_policy;
+            memory
         });
         for subject in store.active_subjects().await? {
             let status = serving.refresh(subject).await?;

@@ -144,9 +144,9 @@ impl MemoryService {
         input: CreateAssociationRequest,
     ) -> Result<AssociationEvidence> {
         self.require_subject(subject).await?;
-        if input.support_value < 0.0 || !input.support_value.is_finite() {
+        if !(0.0..=1.0).contains(&input.support_value) || !input.support_value.is_finite() {
             return Err(Error::Invalid(
-                "association support_value must be finite and non-negative".into(),
+                "association contribution must be finite and within [0,1]".into(),
             ));
         }
         if input.support_class == AssociationSupportClass::MeaningfulUse

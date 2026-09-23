@@ -21,7 +21,7 @@ export function modelOperations(kernel:KernelClient,models:ModelRuntime):Service
       try{proposal=await models.form(new TextDecoder("utf-8",{fatal:true}).decode(source.content),c.signal);}
       catch(error){if(c.signal.aborted)throw error;return {degradation:failure("memory_formation_unavailable",error)};}
       // The model does not supply identity or evidence fields. Source authority is fixed by the operation.
-      const memory=await kernel.authority.formMemory({subjectId:r.subjectId,entityRefs:occurrence.actorEntityRef?[occurrence.actorEntityRef]:[],input:{memoryClass:"specific",semanticRole:proposal.semanticRole,text:proposal.text,title:proposal.title,observedAt:occurrence.observedAt,occurredAt:occurrence.occurredAt,epistemicClass:"derived",evidence:[{reference:{kind:"occurrence",value:r.sourceId},supportRole:"interpretation"}]}},opts);
+      const memory=await kernel.authority.formMemory({subjectId:r.subjectId,entityRefs:occurrence.actorEntityRef?[occurrence.actorEntityRef]:[],input:{memoryClass:"specific",semanticRole:proposal.semanticRole,text:proposal.text,title:proposal.title,epistemicClass:"derived",evidence:[{reference:{kind:"occurrence",value:r.sourceId},supportRole:"interpretation"}]}},opts);
       return {memory,degradation:[]};
     },
     interpretSource:async(r,c)=>{

@@ -625,7 +625,7 @@ impl MemoryService {
             Vec::new()
         } else if !candidate_memory_ids.is_empty() {
             let ids = candidate_memory_ids.iter().copied().collect::<Vec<_>>();
-            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.confidence,r.occurred_at,r.observed_at,r.valid_from,r.valid_to,r.supersession_state FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR o.status='active') AND o.memory_id=ANY($3) ORDER BY r.observed_at DESC")
+            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.created_at,r.valid_from,r.valid_to,r.revision_lifecycle FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR (o.status='active' AND r.revision_lifecycle='current')) AND o.memory_id=ANY($3) ORDER BY r.created_at DESC")
                 .bind(query.subject.0)
                 .bind(query.constraints.include_suppressed)
                 .bind(ids)
@@ -633,7 +633,7 @@ impl MemoryService {
                 .await
                 .map_err(db)?
         } else if pattern.is_empty() {
-            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.confidence,r.occurred_at,r.observed_at,r.valid_from,r.valid_to,r.supersession_state FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR o.status='active') ORDER BY r.observed_at DESC LIMIT $3")
+            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.created_at,r.valid_from,r.valid_to,r.revision_lifecycle FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR (o.status='active' AND r.revision_lifecycle='current')) ORDER BY r.created_at DESC LIMIT $3")
                 .bind(query.subject.0).bind(query.constraints.include_suppressed).bind(plan.candidate_limit as i64).fetch_all(self.store.pool()).await.map_err(db)?
         } else if snapshot.lexical.is_some() && !query.constraints.include_suppressed {
             Vec::new()
@@ -643,7 +643,7 @@ impl MemoryService {
                 .take(16)
                 .map(|term| format!("%{}%", term.replace('%', "")))
                 .collect::<Vec<_>>();
-            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.confidence,r.occurred_at,r.observed_at,r.valid_from,r.valid_to,r.supersession_state FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR o.status='active') AND r.representation_text ILIKE ANY($3) ORDER BY r.observed_at DESC LIMIT $4")
+            sqlx::query("SELECT o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.status,r.revision_no,r.semantic_role,r.title,r.representation_text,r.epistemic_class,r.created_at,r.valid_from,r.valid_to,r.revision_lifecycle FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=o.current_revision_id WHERE o.subject_id=$1 AND ($2 OR (o.status='active' AND r.revision_lifecycle='current')) AND r.representation_text ILIKE ANY($3) ORDER BY r.created_at DESC LIMIT $4")
                 .bind(query.subject.0).bind(query.constraints.include_suppressed).bind(&terms).bind(plan.candidate_limit as i64).fetch_all(self.store.pool()).await.map_err(db)?
         };
         let mut rank_inputs = Vec::new();
@@ -668,10 +668,6 @@ impl MemoryService {
                 .iter()
                 .any(|class| class == &memory_class)
             {
-                continue;
-            }
-            let observed_at: DateTime<Utc> = row.try_get("observed_at").map_err(db)?;
-            if !interval_contains(query.constraints.observed, observed_at) {
                 continue;
             }
             let memory_id = MemoryId(row.try_get("memory_id").map_err(db)?);
@@ -701,10 +697,9 @@ impl MemoryService {
             {
                 continue;
             }
-            let occurred_at: Option<DateTime<Utc>> = row.try_get("occurred_at").map_err(db)?;
             let valid_from: Option<DateTime<Utc>> = row.try_get("valid_from").map_err(db)?;
             let valid_to: Option<DateTime<Utc>> = row.try_get("valid_to").map_err(db)?;
-            if !interval_overlaps(query.constraints.occurred, occurred_at, occurred_at) {
+            if !self.evidence_time_matches(revision,query.constraints.occurred,query.constraints.observed).await? {
                 continue;
             }
             if !interval_overlaps(query.constraints.valid, valid_from, valid_to) {
@@ -718,14 +713,14 @@ impl MemoryService {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            if !temporal_cues.is_empty()
-                && !temporal_cues.iter().any(|interval| {
-                    interval_overlaps(Some(*interval), occurred_at, occurred_at)
-                        || interval_overlaps(Some(*interval), Some(observed_at), Some(observed_at))
-                        || interval_overlaps(Some(*interval), valid_from, valid_to)
-                })
-            {
-                continue;
+            if !temporal_cues.is_empty(){
+                let mut matches=false;
+                for &interval in &temporal_cues {
+                    matches |= self.evidence_time_matches(revision,Some(interval),None).await?
+                        || self.evidence_time_matches(revision,None,Some(interval)).await?
+                        || interval_overlaps(Some(interval),valid_from,valid_to);
+                }
+                if !matches{continue;}
             }
             if !query.constraints.evidence_classes.is_empty()
                 && !self
@@ -747,6 +742,11 @@ impl MemoryService {
                 || candidates.is_exact(&CognitiveRef::MemoryRevision(revision))
                 || exact_refs.contains(&reference)
                 || exact_refs.contains(&CognitiveRef::MemoryRevision(revision));
+            let direct_topology = self.memory_has_entities(revision.0,&entity_cues).await?
+                || self.revision_tags(revision.0).await?.iter().any(|tag|tag_cues.contains(tag))
+                || self.revision_anchors(revision.0).await?.iter().any(|anchor|anchor_cues.contains(anchor));
+            let level=self.accessibility_level(query.subject,memory_id,Utc::now()).await?;
+            if !accessibility_eligible(level,query.effort,exact,direct_topology){continue;}
             let runtime = resident_refs.contains(&format!("memory:{}", memory_id.0))
                 || resident_refs.contains(&format!("memory_revision:{}", revision.0));
             let lexical_hit = lexical_ranks.contains_key(&reference);

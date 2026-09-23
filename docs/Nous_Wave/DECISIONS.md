@@ -43,7 +43,7 @@ Subject Core and Cognitive Runtime are required. Memory is optional and enabled 
 ### D6 — No internal scheduler — LOCKED
 
 ### D7 — Current feature scope — LOCKED
-Fully implement Memory. Other cognitive MicroSystems remain FUTURE boundaries only.
+Fully implement Memory under [MEMORY.md](MEMORY.md). Self/Persona, Social/Relationship, Affect, Motivation, group language conventions and independent epistemic cognition are outside Memory Authority. Their eventual product/physical ownership remains OPEN; preserve explicit integration boundaries only.
 
 ### D8 — Cognitive material is source-agnostic — LOCKED
 

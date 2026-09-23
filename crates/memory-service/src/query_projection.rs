@@ -36,6 +36,11 @@ impl MemoryService {
             if matches!(reference, CognitiveRef::Memory(_)) {
                 continue;
             }
+            if let CognitiveRef::MemoryRevision(revision)=reference {
+                let memory=self.revision(query.subject,*revision).await?;
+                if memory.object.status!=MemoryStatus::Active&&!query.constraints.include_suppressed{continue;}
+            }
+
             let exact_authority = match reference {
                 CognitiveRef::Resource(_) => AuthorityClass::ResourceDescriptor,
                 CognitiveRef::DerivedRepresentation(_) | CognitiveRef::DerivedRegion(_) => {
@@ -108,7 +113,7 @@ impl MemoryService {
                 representation: Some(row.try_get("representation_text").map_err(db)?),
                 authority: AuthorityClass::SubjectCognition,
                 freshness: FreshnessDescriptor {
-                    observed_at: row.try_get("observed_at").map_err(db)?,
+                    observed_at: memory_view.temporal_evidence.observed_max,
                     valid_from: row.try_get("valid_from").map_err(db)?,
                     valid_to: row.try_get("valid_to").map_err(db)?,
                 },
@@ -136,7 +141,7 @@ impl MemoryService {
                 } else {
                     Vec::new()
                 },
-                supersession_state: row.try_get("supersession_state").map_err(db)?,
+                revision_lifecycle: row.try_get("revision_lifecycle").map_err(db)?,
             });
             result_references.insert(candidate.reference);
         }

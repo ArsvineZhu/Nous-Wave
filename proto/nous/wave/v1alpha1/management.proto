@@ -41,7 +41,11 @@ message CreateAssociationRequest { string subject_id = 1; Association associatio
 message NeighborhoodRequest { string subject_id = 1; CognitiveRef root = 2; uint32 max_nodes = 3; uint32 max_depth = 4; }
 message NeighborhoodResponse { repeated CognitiveRef nodes = 1; repeated Association associations = 2; bool truncated = 3; }
 message RebindEntityRequest { string subject_id = 1; string mention_id = 2; optional string entity_ref = 3; string binding_state = 4; optional string host_resolution_ref = 5; optional string reason = 6; }
-message ConsolidateMemoryRequest { string subject_id = 1; repeated string source_revision_ids = 2; string target = 3; string text = 4; string semantic_role = 5; }
+message TopologyTagChange { optional string existing_tag_id = 1; Tag tag = 2; repeated string attach_to_revision_ids = 3; }
+message TopologyRevisionChange { string memory_id = 1; string expected_etag = 2; string intent = 3; MemoryContent content = 4; repeated string entity_refs = 5; }
+message TopologyChanges { repeated TopologyTagChange tags = 1; repeated Anchor anchors = 2; repeated Association associations = 3; repeated TopologyRevisionChange revisions = 4; }
+message ConsolidateMemoryRequest { string subject_id = 1; repeated string source_revision_ids = 2; string target = 3; string text = 4; string semantic_role = 5; TopologyChanges topology = 6; }
+message ConsolidationResponse { Memory memory = 1; uint32 topology_changes = 2; }
 message Occurrence {
   string occurrence_id = 1;
   string subject_id = 2;

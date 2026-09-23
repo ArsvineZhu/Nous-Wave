@@ -911,6 +911,21 @@ pub mod authority_service_server {
     #[async_trait]
     pub trait AuthorityService: std::marker::Send + std::marker::Sync + 'static {
         ///
+        async fn set_accessibility(
+            &self,
+            request: tonic::Request<
+                super::super::super::v1alpha1::SetAccessibilityRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::super::super::v1alpha1::Memory>,
+            tonic::Status,
+        >;
+        ///
+        async fn link_revisions(
+            &self,
+            request: tonic::Request<super::super::super::v1alpha1::LinkRevisionsRequest>,
+        ) -> std::result::Result<tonic::Response<()>, tonic::Status>;
+        ///
         async fn put_resource(
             &self,
             request: tonic::Request<super::super::super::v1alpha1::PutResourceRequest>,
@@ -1033,7 +1048,7 @@ pub mod authority_service_server {
                 super::super::super::v1alpha1::ConsolidateMemoryRequest,
             >,
         ) -> std::result::Result<
-            tonic::Response<super::super::super::v1alpha1::Memory>,
+            tonic::Response<super::super::super::v1alpha1::ConsolidationResponse>,
             tonic::Status,
         >;
         ///
@@ -1352,6 +1367,104 @@ pub mod authority_service_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
+                "/nous.wave.kernel.v1alpha1.AuthorityService/SetAccessibility" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetAccessibilitySvc<T: AuthorityService>(pub Arc<T>);
+                    impl<
+                        T: AuthorityService,
+                    > tonic::server::UnaryService<
+                        super::super::super::v1alpha1::SetAccessibilityRequest,
+                    > for SetAccessibilitySvc<T> {
+                        type Response = super::super::super::v1alpha1::Memory;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::super::super::v1alpha1::SetAccessibilityRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthorityService>::set_accessibility(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetAccessibilitySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nous.wave.kernel.v1alpha1.AuthorityService/LinkRevisions" => {
+                    #[allow(non_camel_case_types)]
+                    struct LinkRevisionsSvc<T: AuthorityService>(pub Arc<T>);
+                    impl<
+                        T: AuthorityService,
+                    > tonic::server::UnaryService<
+                        super::super::super::v1alpha1::LinkRevisionsRequest,
+                    > for LinkRevisionsSvc<T> {
+                        type Response = ();
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::super::super::v1alpha1::LinkRevisionsRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthorityService>::link_revisions(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = LinkRevisionsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/nous.wave.kernel.v1alpha1.AuthorityService/PutResource" => {
                     #[allow(non_camel_case_types)]
                     struct PutResourceSvc<T: AuthorityService>(pub Arc<T>);
@@ -2082,7 +2195,7 @@ pub mod authority_service_server {
                     > tonic::server::UnaryService<
                         super::super::super::v1alpha1::ConsolidateMemoryRequest,
                     > for ConsolidateMemorySvc<T> {
-                        type Response = super::super::super::v1alpha1::Memory;
+                        type Response = super::super::super::v1alpha1::ConsolidationResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,

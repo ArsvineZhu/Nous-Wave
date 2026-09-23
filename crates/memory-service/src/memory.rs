@@ -24,15 +24,6 @@ impl MemoryService {
         self.require_subject(input.subject).await?;
         self.validate_evidence(input.subject, &input.evidence)
             .await?;
-        if input.evidence.iter().any(|evidence| {
-            evidence
-                .weight
-                .is_some_and(|weight| !weight.is_finite() || weight < 0.0)
-        }) {
-            return Err(Error::Invalid(
-                "revision evidence weight must be finite and non-negative".into(),
-            ));
-        }
         for entity in &input.entity_refs {
             EntityRef::new(entity.as_str())?;
         }
@@ -61,8 +52,8 @@ impl MemoryService {
         let now = Utc::now();
         sqlx::query("INSERT INTO memory_objects(memory_id,subject_id,memory_class,current_revision_id,created_at,status) VALUES($1,$2,$3,$4,$5,'active')")
             .bind(memory_id.0).bind(input.subject.0).bind(input.memory_class.as_str()).bind(revision_id.0).bind(now).execute(&mut **tx).await.map_err(db)?;
-        sqlx::query("INSERT INTO memory_revisions(memory_revision_id,memory_id,subject_id,revision_no,parent_revision_id,semantic_role,title,representation_text,attributes,epistemic_class,confidence,occurred_at,observed_at,valid_from,valid_to,created_at,supersession_state) VALUES($1,$2,$3,1,NULL,$4,$5,$6,'{}',$7,$8,$9,$10,$11,$12,$13,'current')")
-            .bind(revision_id.0).bind(memory_id.0).bind(input.subject.0).bind(&input.semantic_role).bind(&input.title).bind(&input.representation_text).bind(format!("{:?}",input.epistemic_class).to_lowercase()).bind(input.confidence).bind(input.occurred_at).bind(input.observed_at).bind(input.valid_from).bind(input.valid_to).bind(now).execute(&mut **tx).await.map_err(db)?;
+        sqlx::query("INSERT INTO memory_revisions(memory_revision_id,memory_id,subject_id,revision_no,parent_revision_id,semantic_role,title,representation_text,attributes,epistemic_class,valid_from,valid_to,created_at,revision_lifecycle) VALUES($1,$2,$3,1,NULL,$4,$5,$6,'{}',$7,$8,$9,$10,'current')")
+            .bind(revision_id.0).bind(memory_id.0).bind(input.subject.0).bind(&input.semantic_role).bind(&input.title).bind(&input.representation_text).bind(format!("{:?}",input.epistemic_class).to_lowercase()).bind(input.valid_from).bind(input.valid_to).bind(now).execute(&mut **tx).await.map_err(db)?;
         sqlx::query("UPDATE memory_objects SET current_revision_id=$2 WHERE memory_id=$1")
             .bind(memory_id.0)
             .bind(revision_id.0)
@@ -85,54 +76,7 @@ impl MemoryService {
             sqlx::query("INSERT INTO memory_revision_tags(memory_revision_id,tag_id,role,ordinal,order_provenance,provenance) VALUES($1,$2,'explicit',$3,$4,'{}')")
                 .bind(revision_id.0).bind(tag.0).bind(ordinal).bind(order_provenance).execute(&mut **tx).await.map_err(db)?;
         }
-        let entity_attachment = input.evidence.first().map(|item| item.evidence.clone());
-        for entity in &input.entity_refs {
-            let mention_id = Uuid::now_v7();
-            // Entity identity comes from the Host. Keep the explicit binding
-            // attached to the same evidence root instead of inventing a
-            // mention without a source coordinate (the Authority schema
-            // intentionally forbids source-less mentions).
-            let (occurrence_id, source_region_id, derived_region_id) = match entity_attachment
-                .as_ref()
-            {
-                Some(EvidenceRef::Occurrence { occurrence_id }) => {
-                    (Some(occurrence_id.0), None, None)
-                }
-                Some(EvidenceRef::SourceRegion { source_region_id }) => {
-                    (None, Some(source_region_id.0), None)
-                }
-                Some(EvidenceRef::DerivedRegion { derived_region_id }) => {
-                    (None, None, Some(derived_region_id.0))
-                }
-                Some(EvidenceRef::DerivedRepresentation {
-                    derived_representation_id,
-                }) => {
-                    let source_region: Option<Uuid> = sqlx::query_scalar(
-                        "SELECT source_region_id FROM derived_representations WHERE derived_representation_id=$1 AND subject_id=$2",
-                    )
-                    .bind(derived_representation_id.0)
-                    .bind(input.subject.0)
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(db)?;
-                    (None, source_region, None)
-                }
-                None => (None, None, None),
-            };
-            sqlx::query("INSERT INTO entity_mentions(mention_id,subject_id,occurrence_id,source_region_id,derived_region_id,surface,semantic_role,created_at) VALUES($1,$2,$3,$4,$5,$6,'explicit',$7)")
-                .bind(mention_id)
-                .bind(input.subject.0)
-                .bind(occurrence_id)
-                .bind(source_region_id)
-                .bind(derived_region_id)
-                .bind(entity.as_str())
-                .bind(now)
-                .execute(&mut **tx)
-                .await
-                .map_err(db)?;
-            sqlx::query("INSERT INTO entity_binding_revisions(binding_revision_id,mention_id,revision_no,entity_ref,binding_state,created_at) VALUES($1,$2,1,$3,'bound',$4)")
-                .bind(Uuid::now_v7()).bind(mention_id).bind(entity.as_str()).bind(now).execute(&mut **tx).await.map_err(db)?;
-        }
+        insert_memory_entities(tx,revision_id,&input.entity_refs,"explicit_formation").await?;
         Ok((memory_id, revision_id))
     }
 
@@ -154,15 +98,6 @@ impl MemoryService {
             ));
         }
         self.validate_evidence(subject, &proposal.evidence).await?;
-        if proposal.evidence.iter().any(|evidence| {
-            evidence
-                .weight
-                .is_some_and(|weight| !weight.is_finite() || weight < 0.0)
-        }) {
-            return Err(Error::Invalid(
-                "revision evidence weight must be finite and non-negative".into(),
-            ));
-        }
         for entity in &proposal.entity_refs {
             EntityRef::new(entity.as_str())?;
         }
@@ -181,35 +116,20 @@ impl MemoryService {
                     entity_refs: proposal.entity_refs,
                     tags: Vec::new(),
                     tag_order_provenance: None,
-                    occurred_at: proposal.occurred_at,
-                    observed_at: Utc::now(),
                     valid_from: proposal.valid_from,
                     valid_to: proposal.valid_to,
                     epistemic_class: proposal.epistemic_class,
-                    confidence: proposal.confidence,
                 },
             )
             .await?;
         for tag in tag_proposals {
-            let existing = sqlx::query_scalar::<_, Uuid>(
-                "SELECT t.tag_id FROM tags t JOIN tag_revisions tr ON tr.tag_revision_id=t.current_revision_id WHERE t.subject_id=$1 AND t.status='active' AND lower(trim(tr.label))=lower(trim($2)) LIMIT 1",
-            )
-            .bind(subject.0)
-            .bind(&tag.label)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db)?;
-            let tag_id = if let Some(tag_id) = existing {
-                TagId(tag_id)
-            } else {
-                let tag_id = TagId::new();
-                let tag_revision_id = Uuid::now_v7();
-                let now = Utc::now();
-                sqlx::query("INSERT INTO tags(tag_id,subject_id,current_revision_id,created_at,status) VALUES($1,$2,$3,$4,'active')")
-                    .bind(tag_id.0).bind(subject.0).bind(tag_revision_id).bind(now).execute(&mut *tx).await.map_err(db)?;
-                sqlx::query("INSERT INTO tag_revisions(tag_revision_id,tag_id,revision_no,label,description,kind_hint,origin,created_at) VALUES($1,$2,1,$3,$4,$5,'model_proposed',$6)")
-                    .bind(tag_revision_id).bind(tag_id.0).bind(&tag.label).bind(&tag.description).bind(&tag.kind_hint).bind(now).execute(&mut *tx).await.map_err(db)?;
-                tag_id
+            let tag_id = match tag {
+                TagProposal::Existing{tag_id}=>{
+                    let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tags WHERE subject_id=$1 AND tag_id=$2 AND status='active')").bind(subject.0).bind(tag_id.0).fetch_one(&mut *tx).await.map_err(db)?;
+                    if !valid{return Err(Error::Invalid("Tag proposal references another Subject or inactive Tag".into()));}
+                    tag_id
+                }
+                TagProposal::New{label,description,kind_hint}=>insert_tag_in_tx(&mut tx,subject,&label,description.as_deref(),kind_hint.as_deref(),"model_proposed").await?,
             };
             sqlx::query("INSERT INTO memory_revision_tags(memory_revision_id,tag_id,role,ordinal,provenance) VALUES($1,$2,'inferred',NULL,$3) ON CONFLICT DO NOTHING")
                 .bind(revision_id.0)
@@ -238,10 +158,10 @@ impl MemoryService {
         memory_id: MemoryId,
         revision: Option<MemoryRevisionId>,
     ) -> Result<MemoryView> {
-        let row = sqlx::query("SELECT o.head_revision,o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.created_at,o.status,r.memory_revision_id,r.revision_no,r.parent_revision_id,r.semantic_role,r.title,r.representation_text,r.attributes,r.epistemic_class,r.confidence,r.occurred_at,r.observed_at,r.valid_from,r.valid_to,r.created_at AS revision_created_at,r.supersession_state FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=COALESCE($3,o.current_revision_id) WHERE o.subject_id=$1 AND o.memory_id=$2 AND r.memory_id=o.memory_id")
+        let row = sqlx::query("SELECT o.accessibility_mode,o.head_revision,o.memory_id,o.subject_id,o.memory_class,o.current_revision_id,o.created_at,o.status,r.memory_revision_id,r.revision_no,r.parent_revision_id,r.semantic_role,r.title,r.representation_text,r.attributes,r.epistemic_class,r.valid_from,r.valid_to,r.created_at AS revision_created_at,r.revision_lifecycle,r.revision_intent FROM memory_objects o JOIN memory_revisions r ON r.memory_revision_id=COALESCE($3,o.current_revision_id) WHERE o.subject_id=$1 AND o.memory_id=$2 AND r.memory_id=o.memory_id")
             .bind(subject.0).bind(memory_id.0).bind(revision.map(|id|id.0)).fetch_optional(self.store.pool()).await.map_err(db)?.ok_or_else(||Error::NotFound("memory not found".into()))?;
         let revision_id = MemoryRevisionId(row.try_get("memory_revision_id").map_err(db)?);
-        let evidence_rows = sqlx::query("SELECT evidence_no,occurrence_id,source_region_id,derived_representation_id,derived_region_id,support_role,weight FROM memory_revision_evidence WHERE memory_revision_id=$1 ORDER BY evidence_no")
+        let evidence_rows = sqlx::query("SELECT evidence_no,occurrence_id,source_region_id,derived_representation_id,derived_region_id,support_role FROM memory_revision_evidence WHERE memory_revision_id=$1 ORDER BY evidence_no")
             .bind(revision_id.0).fetch_all(self.store.pool()).await.map_err(db)?;
         let evidence = evidence_rows
             .into_iter()
@@ -249,11 +169,15 @@ impl MemoryService {
             .collect::<Result<Vec<_>>>()?;
         let tags = sqlx::query_scalar::<_,Uuid>("SELECT tag_id FROM memory_revision_tags WHERE memory_revision_id=$1 ORDER BY ordinal NULLS LAST,tag_id")
             .bind(revision_id.0).fetch_all(self.store.pool()).await.map_err(db)?.into_iter().map(TagId).collect();
-        let entities = sqlx::query_scalar::<_,String>("SELECT DISTINCT b.entity_ref FROM memory_revision_evidence e JOIN entity_mentions m ON (m.occurrence_id=e.occurrence_id OR m.source_region_id=e.source_region_id OR m.derived_region_id=e.derived_region_id) JOIN entity_binding_revisions b ON b.mention_id=m.mention_id WHERE e.memory_revision_id=$1 AND b.revision_no=(SELECT max(b2.revision_no) FROM entity_binding_revisions b2 WHERE b2.mention_id=b.mention_id) AND b.binding_state='bound' AND b.entity_ref IS NOT NULL")
+        let entities = sqlx::query_scalar::<_,String>("SELECT DISTINCT entity_ref FROM memory_revision_entities WHERE memory_revision_id=$1 ORDER BY entity_ref")
             .bind(revision_id.0).fetch_all(self.store.pool()).await.map_err(db)?.into_iter().filter_map(|value|EntityRef::new(value).ok()).collect();
+        let (relations,relations_truncated)=self.revision_relations(subject,revision_id).await?;
         Ok(MemoryView {
+            relations,relations_truncated,accessibility_level:self.accessibility_level(subject,memory_id,Utc::now()).await?,
+            temporal_evidence:self.temporal_evidence(revision_id).await?,
             object: MemoryObject {
                 head_revision: row.try_get("head_revision").map_err(db)?,
+                accessibility_mode:parse_accessibility_mode(&row.try_get::<String,_>("accessibility_mode").map_err(db)?)?,
                 memory_id: MemoryId(row.try_get("memory_id").map_err(db)?),
                 subject_id: SubjectId(row.try_get("subject_id").map_err(db)?),
                 memory_class: parse_memory_class(
@@ -266,6 +190,7 @@ impl MemoryService {
                 status: parse_memory_status(&row.try_get::<String, _>("status").map_err(db)?)?,
             },
             revision: MemoryRevision {
+                revision_intent:row.try_get::<Option<String>,_>("revision_intent").map_err(db)?.map(|s|serde_json::from_value(serde_json::Value::String(s)).map_err(|e|Error::Infrastructure(e.to_string()))).transpose()?,
                 memory_revision_id: revision_id,
                 memory_id,
                 subject_id: subject,
@@ -281,14 +206,11 @@ impl MemoryService {
                 epistemic_class: parse_epistemic(
                     &row.try_get::<String, _>("epistemic_class").map_err(db)?,
                 )?,
-                confidence: row.try_get("confidence").map_err(db)?,
-                occurred_at: row.try_get("occurred_at").map_err(db)?,
-                observed_at: row.try_get("observed_at").map_err(db)?,
                 valid_from: row.try_get("valid_from").map_err(db)?,
                 valid_to: row.try_get("valid_to").map_err(db)?,
                 created_at: row.try_get("revision_created_at").map_err(db)?,
-                supersession_state: parse_supersession(
-                    &row.try_get::<String, _>("supersession_state").map_err(db)?,
+                revision_lifecycle: parse_revision_lifecycle(
+                    &row.try_get::<String, _>("revision_lifecycle").map_err(db)?,
                 )?,
             },
             evidence,
@@ -316,80 +238,16 @@ impl MemoryService {
         Ok(revisions)
     }
 
-    pub async fn revise_memory(&self, input: ReviseMemoryInput) -> Result<MemoryView> {
-        if input.representation_text.trim().is_empty()
-            || input.representation_text.len() > 1_000_000
-        {
-            return Err(Error::Invalid("revision representation is required".into()));
-        }
-        if let Some(role) = &input.semantic_role
-            && (role.trim().is_empty() || role.len() > 128)
-        {
-            return Err(Error::Invalid("revision semantic_role is invalid".into()));
-        }
-        if let (Some(start), Some(end)) = (input.valid_from, input.valid_to)
-            && start > end
-        {
-            return Err(Error::Invalid("valid_to precedes valid_from".into()));
-        }
-        if input
-            .confidence
-            .is_some_and(|confidence| !confidence.is_finite() || !(0.0..=1.0).contains(&confidence))
-        {
-            return Err(Error::Invalid("confidence must be within [0,1]".into()));
-        }
-        self.validate_evidence(input.subject, &input.evidence)
-            .await?;
-        let mut tx = self.store.begin().await?;
-        self.fence_memory_head(
-            &mut tx,
-            input.subject,
-            input.memory_id,
-            input.expected_head_revision,
-        )
-        .await?;
-        let current = self.memory(input.subject, input.memory_id, None).await?;
-        let now = Utc::now();
-        let new_id = MemoryRevisionId::new();
-        let next_no = current.revision.revision_no + 1;
-        sqlx::query(
-            "UPDATE memory_revisions SET supersession_state=$2 WHERE memory_revision_id=$1",
-        )
-        .bind(current.revision.memory_revision_id.0)
-        .bind(match input.relation {
-            MemoryRelation::Contradicts => "contradicted",
-            _ => "superseded",
-        })
-        .execute(&mut *tx)
-        .await
-        .map_err(db)?;
-        sqlx::query("INSERT INTO memory_revisions(memory_revision_id,memory_id,subject_id,revision_no,parent_revision_id,semantic_role,title,representation_text,attributes,epistemic_class,confidence,occurred_at,observed_at,valid_from,valid_to,created_at,supersession_state) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'{}',$9,$10,$11,$12,$13,$14,$15,'current')")
-            .bind(new_id.0).bind(input.memory_id.0).bind(input.subject.0).bind(next_no).bind(current.revision.memory_revision_id.0).bind(input.semantic_role.unwrap_or(current.revision.semantic_role)).bind(input.title.or(current.revision.title)).bind(&input.representation_text).bind(format!("{:?}",input.epistemic_class).to_lowercase()).bind(input.confidence).bind(input.occurred_at).bind(now).bind(input.valid_from).bind(input.valid_to).bind(now).execute(&mut *tx).await.map_err(db)?;
-        sqlx::query(
-            "UPDATE memory_objects SET current_revision_id=$2 WHERE subject_id=$1 AND memory_id=$3",
-        )
-        .bind(input.subject.0)
-        .bind(new_id.0)
-        .bind(input.memory_id.0)
-        .execute(&mut *tx)
-        .await
-        .map_err(db)?;
-        sqlx::query("INSERT INTO memory_revision_relations(from_revision_id,to_revision_id,relation,created_at) VALUES($1,$2,$3,$4)").bind(new_id.0).bind(current.revision.memory_revision_id.0).bind(input.relation.as_str()).bind(now).execute(&mut *tx).await.map_err(db)?;
-        for evidence in &input.evidence {
-            insert_evidence(&mut tx, new_id, evidence).await?;
-        }
-        nous_authority_store::AuthorityStore::invalidate_in(
-            &mut tx,
-            input.subject,
-            ProjectionInvalidation {
-                topology: true,
-                ..ProjectionInvalidation::text()
-            },
-        )
-        .await?;
+    pub async fn revise_memory(&self,input:ReviseMemoryInput)->Result<MemoryView>{
+        self.validate_evidence(input.subject,&input.evidence).await?;
+        let mut tx=self.store.begin().await?;
+        self.fence_memory_head(&mut tx,input.subject,input.memory_id,input.expected_head_revision).await?;
+        let current=self.memory(input.subject,input.memory_id,None).await?;
+        let proposal=TopologyRevisionProposal{memory_id:input.memory_id,expected_head_revision:input.expected_head_revision,intent:input.intent,entity_refs:input.entity_refs,representation_text:input.representation_text,semantic_role:input.semantic_role,title:input.title,evidence:input.evidence,valid_from:input.valid_from,valid_to:input.valid_to,epistemic_class:input.epistemic_class};
+        let revision=insert_revision_in_tx(&mut tx,input.subject,&current,&proposal).await?;
+        AuthorityStore::invalidate_in(&mut tx,input.subject,ProjectionInvalidation{topology:true,..ProjectionInvalidation::text()}).await?;
         tx.commit().await.map_err(db)?;
-        let view = self.memory(input.subject, input.memory_id, None).await?;
-        Ok(view)
+        self.memory(input.subject,input.memory_id,Some(revision)).await
     }
 
     pub async fn consolidate(
@@ -430,6 +288,7 @@ impl MemoryService {
             return self.consolidate_topology(subject, topology).await;
         }
         let mut evidence = Vec::new();
+        let mut entities=HashSet::new();
         for revision_id in &request.source_memories {
             let row = sqlx::query("SELECT memory_id FROM memory_revisions WHERE subject_id=$1 AND memory_revision_id=$2")
                 .bind(subject.0)
@@ -440,10 +299,10 @@ impl MemoryService {
                 .ok_or_else(|| Error::Invalid("consolidation source revision is outside Subject".into()))?;
             let memory_id = MemoryId(row.try_get("memory_id").map_err(db)?);
             let source = self.memory(subject, memory_id, Some(*revision_id)).await?;
+            entities.extend(source.entities);
             for item in source.evidence {
                 let mut item = item;
                 item.evidence_no = evidence.len() as i32;
-                item.support_role = SupportRole::Contextual;
                 evidence.push(item);
             }
         }
@@ -466,15 +325,12 @@ impl MemoryService {
             representation_text: representation,
             title: None,
             evidence,
-            entity_refs: Vec::new(),
+            entity_refs: entities.into_iter().collect(),
             tags: Vec::new(),
             tag_order_provenance: None,
-            occurred_at: None,
-            observed_at: Utc::now(),
             valid_from: None,
             valid_to: None,
             epistemic_class: EpistemicClass::Derived,
-            confidence: None,
         };
         let mut tx = self.store.begin().await?;
         let (memory_id, revision_id) = self.insert_memory_authority(&mut tx, &memory_input).await?;
@@ -552,6 +408,7 @@ impl MemoryService {
             changes += 1;
         }
         for revision in &topology.revisions {
+            self.fence_memory_head(&mut tx,subject,revision.memory_id,revision.expected_head_revision).await?;
             let current = self.memory(subject, revision.memory_id, None).await?;
             insert_revision_in_tx(&mut tx, subject, &current, revision).await?;
             changes += 1;
@@ -628,7 +485,7 @@ impl MemoryService {
             }
         }
         for association in &proposal.associations {
-            if !association.support_value.is_finite() || association.support_value < 0.0 {
+            if !association.support_value.is_finite() || !(0.0..=1.0).contains(&association.support_value) {
                 return Err(Error::Invalid(
                     "consolidation Association support_value is invalid".into(),
                 ));
@@ -678,12 +535,6 @@ impl MemoryService {
                 ));
             }
             self.validate_evidence(subject, &revision.evidence).await?;
-            if revision
-                .confidence
-                .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
-            {
-                return Err(Error::Invalid("consolidation confidence is invalid".into()));
-            }
         }
         Ok(())
     }

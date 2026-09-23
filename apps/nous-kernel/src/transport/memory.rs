@@ -5,7 +5,7 @@ use nous_memory_domain::{EvidenceRef, ExplicitMemoryInput, MemoryRevisionEvidenc
 use nous_memory_service::{MemoryView, ReviseMemoryInput};
 use uuid::Uuid;
 
-fn view(input: MemoryView) -> p::Memory {
+pub(super) fn view(input: MemoryView) -> p::Memory {
     let object = input.object;
     let r = input.revision;
     p::Memory {
@@ -27,18 +27,21 @@ fn view(input: MemoryView) -> p::Memory {
             })
             .collect(),
         tags: input.tags.into_iter().map(|t| t.0.to_string()).collect(),
-        occurred_at: r.occurred_at.map(timestamp),
-        observed_at: Some(timestamp(r.observed_at)),
+        created_at:Some(timestamp(r.created_at)),
+        temporal_evidence:Some(p::TemporalEvidence{occurred_min:input.temporal_evidence.occurred_min.map(timestamp),occurred_max:input.temporal_evidence.occurred_max.map(timestamp),observed_min:input.temporal_evidence.observed_min.map(timestamp),observed_max:input.temporal_evidence.observed_max.map(timestamp)}),
+        revision_lifecycle:enum_name(r.revision_lifecycle),revision_intent:r.revision_intent.map(enum_name),
+        accessibility_mode:enum_name(object.accessibility_mode),accessibility_level:enum_name(input.accessibility_level),
+        entity_refs:input.entities.into_iter().map(|e|e.as_str().into()).collect(),
+        relations:input.relations.into_iter().map(|r|p::RevisionRelation{from_revision_id:r.from_revision_id.0.to_string(),to_revision_id:r.to_revision_id.0.to_string(),relation:enum_name(r.relation)}).collect(),relations_truncated:input.relations_truncated,
         valid: Some(p::TimeInterval {
             start: r.valid_from.map(timestamp),
             end: r.valid_to.map(timestamp),
         }),
         epistemic_class: enum_name(r.epistemic_class),
-        confidence: r.confidence,
         revision_no: r.revision_no,
     }
 }
-fn evidence(input: Vec<p::Evidence>) -> Result<Vec<MemoryRevisionEvidence>> {
+pub(super) fn evidence(input: Vec<p::Evidence>) -> Result<Vec<MemoryRevisionEvidence>> {
     input
         .into_iter()
         .enumerate()
@@ -64,12 +67,11 @@ fn evidence(input: Vec<p::Evidence>) -> Result<Vec<MemoryRevisionEvidence>> {
                 evidence_no: index as i32,
                 evidence,
                 support_role: enum_value(&e.support_role)?,
-                weight: None,
             })
         })
         .collect()
 }
-fn etag(value: &str) -> Result<i64> {
+pub(super) fn etag(value: &str) -> Result<i64> {
     value
         .strip_prefix("h:")
         .and_then(|v| v.parse().ok())
@@ -77,36 +79,13 @@ fn etag(value: &str) -> Result<i64> {
         .ok_or_else(|| Error::Invalid("expected_etag is required".into()))
 }
 impl KernelService {
-    pub(super) async fn consolidate_memory(
-        &self,
-        input: p::ConsolidateMemoryRequest,
-    ) -> Result<p::Memory> {
-        let subject = SubjectId(id(&input.subject_id)?);
-        let result = self
-            .0
-            .require_memory()?
-            .consolidate(
-                subject,
-                nous_memory_domain::ConsolidationRequest {
-                    subject,
-                    source_memories: input
-                        .source_revision_ids
-                        .iter()
-                        .map(|r| Ok(MemoryRevisionId(id(r)?)))
-                        .collect::<Result<_>>()?,
-                    target: enum_value(&input.target)?,
-                    capability: nous_core::CapabilityRequirement {
-                        operation: nous_core::CapabilityOperation::MemoryConsolidationText,
-                        strength: nous_core::RequirementStrength::Optional,
-                    },
-                    representation_text: Some(input.text),
-                    semantic_role: Some(input.semantic_role),
-                    topology: None,
-                },
-            )
-            .await?;
-        Ok(view(required(result.memory, "consolidated Memory")?))
+    pub(super) async fn set_accessibility(&self,input:p::SetAccessibilityRequest)->Result<p::Memory>{
+        Ok(view(self.0.require_memory()?.set_accessibility(SubjectId(id(&input.subject_id)?),MemoryId(id(&input.memory_id)?),etag(&input.expected_etag)?,enum_value(&input.mode)?).await?))
     }
+    pub(super) async fn link_revisions(&self,input:p::LinkRevisionsRequest)->Result<()>{
+        self.0.require_memory()?.link_revisions(SubjectId(id(&input.subject_id)?),MemoryRevisionId(id(&input.from_revision_id)?),MemoryRevisionId(id(&input.to_revision_id)?),enum_value(&input.relation)?).await
+    }
+
     pub(super) async fn get_memory(&self, input: p::ObjectRequest) -> Result<p::Memory> {
         Ok(view(
             self.0
@@ -154,12 +133,9 @@ impl KernelService {
                         .map(|t| Ok(TagId(id(t)?)))
                         .collect::<Result<_>>()?,
                     tag_order_provenance: None,
-                    occurred_at: time(m.occurred_at)?,
-                    observed_at: required(time(m.observed_at)?, "observed_at")?,
                     valid_from: time(valid.start)?,
                     valid_to: time(valid.end)?,
                     epistemic_class: enum_value(&m.epistemic_class)?,
-                    confidence: m.confidence,
                 })
                 .await?,
         ))
@@ -178,12 +154,11 @@ impl KernelService {
                     semantic_role: Some(m.semantic_role),
                     title: m.title,
                     evidence: evidence(m.evidence)?,
-                    relation: enum_value(input.relation.as_deref().unwrap_or("supersedes"))?,
-                    occurred_at: time(m.occurred_at)?,
+                    intent: enum_value(&input.intent)?,
+                    entity_refs:input.entity_refs.into_iter().map(EntityRef::new).collect::<Result<_>>()?,
                     valid_from: time(valid.start)?,
                     valid_to: time(valid.end)?,
                     epistemic_class: enum_value(&m.epistemic_class)?,
-                    confidence: m.confidence,
                 })
                 .await?,
         ))

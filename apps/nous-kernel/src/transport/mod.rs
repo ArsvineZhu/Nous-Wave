@@ -6,6 +6,7 @@ mod identity;
 mod management;
 mod material;
 mod memory;
+mod consolidation;
 mod model;
 mod query;
 mod runtime;

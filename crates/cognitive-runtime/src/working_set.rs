@@ -65,6 +65,7 @@ pub trait ContextResolver: Send + Sync {
         subject: SubjectId,
         reference: &CognitiveRef,
         max_bytes: usize,
+        explicit: bool,
     ) -> Result<ContextSource>;
 }
 
@@ -85,6 +86,7 @@ impl CognitiveRuntimeService {
         }
         self.require_session(request.subject, request.session_id)
             .await?;
+        let explicit_refs:HashSet<_>=request.references.iter().cloned().chain(request.query_results.iter().map(|h|h.reference.clone())).collect();
         let mut references = request
             .query_results
             .iter()
@@ -131,6 +133,7 @@ impl CognitiveRuntimeService {
                     } else {
                         0
                     },
+                    explicit_refs.contains(&reference),
                 )
                 .await
             {

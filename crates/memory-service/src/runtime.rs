@@ -8,6 +8,7 @@ impl MemoryService {
         serving: nous_serving::ServingService,
     ) -> Self {
         Self {
+            accessibility_policy: AccessibilityPolicy::default(),
             store,
             objects,
             cognition,

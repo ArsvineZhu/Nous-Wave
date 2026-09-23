@@ -337,6 +337,8 @@ pub struct Hit {
     pub semantic_role: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="10")]
     pub memory_class: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="11")]
+    pub revision_lifecycle: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ResourceAction {
@@ -384,6 +386,45 @@ pub struct UseEvent {
     #[prost(message, optional, tag="3")]
     pub context: ::core::option::Option<::prost_types::Struct>,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TemporalEvidence {
+    #[prost(message, optional, tag="1")]
+    pub occurred_min: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag="2")]
+    pub occurred_max: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag="3")]
+    pub observed_min: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag="4")]
+    pub observed_max: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevisionRelation {
+    #[prost(string, tag="1")]
+    pub from_revision_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub to_revision_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub relation: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MemoryContent {
+    #[prost(string, tag="1")]
+    pub memory_class: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub semantic_role: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub text: ::prost::alloc::string::String,
+    #[prost(string, optional, tag="4")]
+    pub title: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag="5")]
+    pub evidence: ::prost::alloc::vec::Vec<Evidence>,
+    #[prost(string, repeated, tag="6")]
+    pub tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag="7")]
+    pub valid: ::core::option::Option<TimeInterval>,
+    #[prost(string, tag="8")]
+    pub epistemic_class: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Memory {
     #[prost(string, tag="1")]
@@ -409,17 +450,29 @@ pub struct Memory {
     #[prost(string, repeated, tag="11")]
     pub tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(message, optional, tag="12")]
-    pub occurred_at: ::core::option::Option<::prost_types::Timestamp>,
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(message, optional, tag="13")]
-    pub observed_at: ::core::option::Option<::prost_types::Timestamp>,
+    pub temporal_evidence: ::core::option::Option<TemporalEvidence>,
     #[prost(message, optional, tag="14")]
     pub valid: ::core::option::Option<TimeInterval>,
     #[prost(string, tag="15")]
     pub epistemic_class: ::prost::alloc::string::String,
-    #[prost(double, optional, tag="16")]
-    pub confidence: ::core::option::Option<f64>,
+    #[prost(string, tag="16")]
+    pub revision_lifecycle: ::prost::alloc::string::String,
     #[prost(int32, tag="17")]
     pub revision_no: i32,
+    #[prost(string, tag="18")]
+    pub accessibility_mode: ::prost::alloc::string::String,
+    #[prost(string, tag="19")]
+    pub accessibility_level: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="20")]
+    pub entity_refs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag="21")]
+    pub relations: ::prost::alloc::vec::Vec<RevisionRelation>,
+    #[prost(bool, tag="22")]
+    pub relations_truncated: bool,
+    #[prost(string, optional, tag="23")]
+    pub revision_intent: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListMemoriesResponse {
@@ -433,7 +486,7 @@ pub struct FormMemoryRequest {
     #[prost(string, tag="1")]
     pub subject_id: ::prost::alloc::string::String,
     #[prost(message, optional, tag="2")]
-    pub input: ::core::option::Option<Memory>,
+    pub input: ::core::option::Option<MemoryContent>,
     #[prost(string, repeated, tag="3")]
     pub entity_refs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
@@ -446,9 +499,33 @@ pub struct ReviseMemoryRequest {
     #[prost(string, tag="3")]
     pub expected_etag: ::prost::alloc::string::String,
     #[prost(message, optional, tag="4")]
-    pub input: ::core::option::Option<Memory>,
-    #[prost(string, optional, tag="5")]
-    pub relation: ::core::option::Option<::prost::alloc::string::String>,
+    pub input: ::core::option::Option<MemoryContent>,
+    #[prost(string, tag="5")]
+    pub intent: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="6")]
+    pub entity_refs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetAccessibilityRequest {
+    #[prost(string, tag="1")]
+    pub subject_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub memory_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub expected_etag: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub mode: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LinkRevisionsRequest {
+    #[prost(string, tag="1")]
+    pub subject_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub from_revision_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub to_revision_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub relation: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MemoryMutationRequest {
@@ -882,6 +959,39 @@ pub struct RebindEntityRequest {
     pub reason: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TopologyTagChange {
+    #[prost(string, optional, tag="1")]
+    pub existing_tag_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag="2")]
+    pub tag: ::core::option::Option<Tag>,
+    #[prost(string, repeated, tag="3")]
+    pub attach_to_revision_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TopologyRevisionChange {
+    #[prost(string, tag="1")]
+    pub memory_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub expected_etag: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub intent: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="4")]
+    pub content: ::core::option::Option<MemoryContent>,
+    #[prost(string, repeated, tag="5")]
+    pub entity_refs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TopologyChanges {
+    #[prost(message, repeated, tag="1")]
+    pub tags: ::prost::alloc::vec::Vec<TopologyTagChange>,
+    #[prost(message, repeated, tag="2")]
+    pub anchors: ::prost::alloc::vec::Vec<Anchor>,
+    #[prost(message, repeated, tag="3")]
+    pub associations: ::prost::alloc::vec::Vec<Association>,
+    #[prost(message, repeated, tag="4")]
+    pub revisions: ::prost::alloc::vec::Vec<TopologyRevisionChange>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConsolidateMemoryRequest {
     #[prost(string, tag="1")]
     pub subject_id: ::prost::alloc::string::String,
@@ -893,6 +1003,15 @@ pub struct ConsolidateMemoryRequest {
     pub text: ::prost::alloc::string::String,
     #[prost(string, tag="5")]
     pub semantic_role: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="6")]
+    pub topology: ::core::option::Option<TopologyChanges>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConsolidationResponse {
+    #[prost(message, optional, tag="1")]
+    pub memory: ::core::option::Option<Memory>,
+    #[prost(uint32, tag="2")]
+    pub topology_changes: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Occurrence {

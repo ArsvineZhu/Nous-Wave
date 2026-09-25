@@ -1,31 +1,15 @@
-# Nous Wave Documentation
+# Nous Wave 工程文档
 
-This directory contains the current architecture and system documentation.
+本目录只维护与当前代码同步变化的工程事实。
 
-## Authority order
+## 当前文档
 
-1. [`ARCHITECTURE.md`](ARCHITECTURE.md) — semantic ownership and system invariants.
-2. [`DECISIONS.md`](DECISIONS.md) — decision status: LOCKED / DERIVED / DEFAULT / OPEN / FUTURE.
-3. Active implementation handoff — current execution-only decisions.
-4. [`DESIGN_TRANSFER.md`](DESIGN_TRANSFER.md) — mature-system research transfer and rejection boundaries.
-5. Current implementation.
+- [CURRENT_STATE.md](CURRENT_STATE.md)：当前代码真实具备的对象、模块和已知设计差距。
 
-[`SYSTEM.md`](SYSTEM.md) explains the implementation and operating flows. It is explanatory and cannot override architecture or decision status.
+当前实施顺序与授权在 `project/plans/active/`。未来可执行规格放入仓库级 `specs/`，并与实现同时演进。
 
-[`SOURCES.md`](SOURCES.md) records research lineage and dependency/evidence sources.
+## 长期设计
 
-## 新研究
+Nous Wave 的目标设计、设计决定、论证和研究位于 `Heptalogos-Devs/Architecture-Vault/docs/Nous-Wave/`。这里不复制这些内容。
 
-2026 年 9 月的新架构、认知运行时、NousQL 与身份寻址材料见[研究入口](research/README.md)。整理稿使用中文，包含主题归纳、来源原文和与当前实现的差距；研究中的 `LOCKED` / `CONVERGED` 不代表代码已落地或新的执行授权。完整文档目录见 [INDEX.md](INDEX.md)。
-
-## Key distinction
-
-A physical/algorithmic `DEFAULT` can be:
-
-```text
-ExecutionStatus = FROZEN_FOR_CURRENT_WAVE
-```
-
-without becoming permanent cognitive architecture.
-
-The repository must remain understandable from these current-state documents without requiring chat history or temporary execution material.
+历史上的 `ARCHITECTURE.md`、`DECISIONS.md`、`DESIGN_TRANSFER.md`、`IMPLEMENTATION_SPEC.md`、`MEMORY.md`、`SYSTEM.md` 和旧 `research/` 已退出当前阅读路径。需要追溯时使用 Git 历史。

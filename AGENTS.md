@@ -1,115 +1,53 @@
 # AGENTS.md
 
-Execution contract for Nous Wave.
+Nous Wave repository execution contract.
 
 ## Project posture
 
-```text
-DevelopmentMode = RAPID_EVOLUTION
+DevelopmentMode = RAPID_EVOLUTION  
 CompatibilityEpoch = PRE_PRODUCTION
-Architecture = RollingWave
-```
 
-Repository history creates no compatibility obligation. Rewrite internal APIs, schemas, crate boundaries and migrations directly when the current architecture requires it. Do not add aliases, shims, fallback readers, dual paths or legacy layers without a real current compatibility obligation.
+Development history creates no compatibility obligation. Rewrite or delete obsolete internal APIs, schemas, tests and documents when the approved current design requires it. Do not add legacy aliases, dual readers or compatibility layers without a declared obligation.
 
-## Authority
+## Knowledge authority
 
-Read in this order:
+Long-term product and cognition design lives in `Heptalogos-Devs/Architecture-Vault`.
 
-1. `docs/Nous_Wave/ARCHITECTURE.md`
-2. `docs/Nous_Wave/DECISIONS.md`
-3. active implementation handoff/spec
-4. `docs/Nous_Wave/DESIGN_TRANSFER.md`
-5. current implementation
+For design work, read the relevant Vault target-design chapters and accepted decisions first. Design rationale and research explain decisions but do not override target design.
 
-`docs/Nous_Wave/SYSTEM.md` explains behavior but does not override architecture/decisions.
+For implementation work, use this order:
 
-A DEFAULT selected for the active wave may be frozen for execution without becoming permanent architecture.
+1. this file;
+2. the designated active Plan under `project/plans/active/`;
+3. current Specs owned by this repository;
+4. `docs/Nous_Wave/CURRENT_STATE.md` and affected package documentation;
+5. current code and focused verification.
+
+If implementation requires a semantic decision absent from Vault and the active Plan, stop that branch as `PLAN_GAP`. Do not let existing code decide architecture by inertia.
+
+## Current repository role
+
+This repository implements Nous Wave. It owns current code, executable Specs, Plans, qualification evidence and implementation facts. It does not duplicate the long-term target design stored in Architecture-Vault.
+
+The current code predates parts of the target design. Existing names such as `MemoryClass`, `Anchor`, current accessibility rules and current retrieval algorithms are implementation facts, not permanent design commitments.
 
 ## Core invariants
 
-```text
-Subject != Model
-Character Seed != evolved Persona
-Artifact != Memory
-ObservationOccurrence != Artifact
-Message != Memory
-Tool result != Truth
-Retrieved != Reinforced
-Forgetting != Suppression != Purge
-Resource awareness != Resource contents
-Serving projection != Cognitive Authority
-MicroSystem != microservice/plugin marketplace
-```
+- Subject identity is independent of model, provider, process and session.
+- Cognitive Authority, cognitive runtime and rebuildable serving projections remain separate.
+- Artifact, observation occurrence, evidence and cognition have distinct identities.
+- Retrieval or presentation does not create long-term reinforcement.
+- Suppression, accessibility and destructive purge are distinct operations.
+- Models and cross-domain reasoning produce proposals unless an owning deterministic contract authorizes direct commit.
+- Domain owners own semantics; mature libraries and platform facilities should own generic mechanics when suitable.
+- Do not invent numeric cognitive scales without an operational definition.
 
-Subject Core and Cognitive Runtime are required owners. Memory is an optional cognitive MicroSystem enabled by the reference profile.
+## Engineering
 
-## Executor role
+Use the narrowest useful check while iterating. At meaningful acceptance boundaries run `just verify` when the active Plan requires full repository verification.
 
-Implement the active design. Do not reopen decided architecture during execution.
-
-If implementation reveals a material unresolved semantic/ownership/provider/failure decision, report a narrow `PLAN_GAP`. Do not hide uncertainty behind a registry, framework, policy engine, configuration layer or generic abstraction.
-
-## Library-first
-
-Use mature libraries and platform facilities for generic mechanics.
-
-Current physical defaults include PostgreSQL/SQLx, OpenDAL, BLAKE3, Tantivy, USearch, petgraph, nalgebra, roaring, Rayon, ArcSwap, Axum and Tokio.
-
-Dependency count is not a quality metric.
-
-## Algorithm boundaries
-
-Stable abstractions represent semantic problem families, not concrete algorithm names.
-
-Current defaults include:
-- EPA/Residual for semantic cue sensing;
-- bounded competitive Wave for associative expansion.
-
-These algorithms may be replaced behind narrow internal traits when justified. Do not create a generic algorithm marketplace or expose implementation-specific algorithm fields in public Cognitive Query semantics.
-
-VCP is research lineage only. Do not copy/transliterate its source code.
-
-## Architecture discipline
-
-- Domain owners own semantics; mature libraries own generic mechanics.
-- Memory must not own Subject Core or generic Cognitive Runtime.
-- Serving projections never become Authority.
-- Preserve immutable provenance and revision lineage.
-- Keep classification axes orthogonal.
-- Do not force arbitrary material into chat-message/text-chunk shapes.
-- Do not create a universal `CognitiveObject` JSON ontology.
-- Do not invent numeric cognitive scales without operational meaning.
-- Do not add a scheduler/cron/self-wakeup loop.
-- Do not create empty future MicroSystem crates.
-- Do not silently drop a design transfer documented in `DESIGN_TRANSFER.md`.
-
-## Repository engineering
-
-Deterministic mechanical invariants should be automated.
-
-Use:
-- rustfmt;
-- Clippy workspace lints;
-- cargo-deny;
-- cargo-shear;
-- source-shape guard;
-- Just as the task entrypoint.
-
-Large source files are signals, not architecture definitions. A >1000-line Rust source file is blocked by repository policy unless explicitly excluded/generated. Refactor by semantic ownership and independent reasons to change, not arbitrary line slicing.
-
-## Verification
-
-During iteration use the narrowest useful check.
-
-At meaningful integration/acceptance boundaries run:
-
-```text
-just verify
-```
-
-Tests protect semantic contracts and observed risks. TDD is optional.
+Do not begin implementation from superseded design material recovered from Git history. Historical files are evidence of past work only.
 
 ## Completion
 
-When the active implementation behavior, repository governance and acceptance proof are complete, remove obsolete execution-stage artifacts and STOP.
+When the active Plan's acceptance conditions are met and required verification is green, stop. New architecture work requires a new accepted design decision or Plan.

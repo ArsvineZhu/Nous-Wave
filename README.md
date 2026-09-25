@@ -1,68 +1,24 @@
 # Nous Wave
 
-Nous Wave is a pre-production Subject cognition system.
+Nous Wave is a pre-production Subject cognition system. This repository owns the current TypeScript Core, Rust Kernel, protocol, Memory implementation, and implementation-level references.
 
-It maintains long-lived cognitive state across model calls, processes, providers and interaction surfaces while keeping external systems authoritative for their own live/current facts.
+## Target design
 
-## Architecture
+- [Nous Wave Target Design PDF](https://github.com/Heptalogos-Devs/Architecture-Vault/releases/download/nous-wave-target-design-latest/Nous_Wave_Target_Design.pdf)
+- [Architecture-Vault](https://github.com/Heptalogos-Devs/Architecture-Vault)
 
-Current authority:
-- [`docs/Nous_Wave/ARCHITECTURE.md`](docs/Nous_Wave/ARCHITECTURE.md)
-- [`docs/Nous_Wave/DECISIONS.md`](docs/Nous_Wave/DECISIONS.md)
-- [`docs/Nous_Wave/DESIGN_TRANSFER.md`](docs/Nous_Wave/DESIGN_TRANSFER.md)
+Architecture-Vault owns long-term product semantics, accepted design decisions, rationale, and research. This repository maintains code facts, current implementation architecture and gaps, active implementation plans, and code-specific API references.
 
-System walkthrough:
-- [`docs/Nous_Wave/SYSTEM.md`](docs/Nous_Wave/SYSTEM.md)
+## Current implementation documentation
 
-Research/source lineage:
-- [`docs/Nous_Wave/SOURCES.md`](docs/Nous_Wave/SOURCES.md)
-- [新架构、认知运行时与 NousQL 研究整理（中文）](docs/Nous_Wave/research/README.md)
-
-Core ownership:
-
-```text
-Subject Core             required
-Cognitive Runtime        required
-Memory MicroSystem       optional; enabled in reference profile
-```
-
-Serving projections are rebuildable mechanics and never cognitive Authority.
+- [Repository INDEX](INDEX.md)
+- [Documentation overview](docs/README.md)
+- [Documentation INDEX](docs/INDEX.md)
+- [Current implementation architecture](docs/architecture/current-implementation.md)
+- [Current state and gaps](docs/current-state/CURRENT_STATE.md)
+- [Active plans](docs/plans/README.md)
+- [NousQL implementation reference](docs/reference/NOUSQL.md)
 
 ## Development
 
-Pinned Rust toolchain: `rust-toolchain.toml`.
-
-Install repository development commands once:
-
-```text
-cargo install just cargo-deny cargo-shear --locked
-```
-
-Common commands:
-
-```text
-just fmt
-just check
-just lint
-just test
-just verify
-```
-
-`just verify` includes formatting, workspace checking, Clippy, tests, dependency/security/license checks and repository source-shape checks.
-
-## Runtime defaults
-
-The current local implementation uses:
-- PostgreSQL + SQLx for structured Authority;
-- OpenDAL/BLAKE3 for raw artifact CAS;
-- Tantivy for lexical serving;
-- USearch for dense serving;
-- petgraph CSR for topology serving.
-
-These are current implementation defaults, not permanent cognitive theory.
-
-## VCP lineage
-
-VCP TagMemo/RiverMemo is algorithmic research lineage for weak-cue sensing, bounded Wave-style associative expansion, actual-flow and topology-field mechanics.
-
-VCP source code is not copied and is not a runtime dependency.
+The pinned Rust toolchain is specified by [`rust-toolchain.toml`](rust-toolchain.toml). Rust workspace verification is provided by [`justfile`](justfile): `just fmt`, `just check`, `just lint`, `just test`, and `just verify`. The TypeScript/Protobuf check is `corepack pnpm check`.

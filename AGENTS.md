@@ -1,115 +1,24 @@
-# AGENTS.md
-
-Execution contract for Nous Wave.
-
-## Project posture
-
-```text
-DevelopmentMode = RAPID_EVOLUTION
-CompatibilityEpoch = PRE_PRODUCTION
-Architecture = RollingWave
-```
-
-Repository history creates no compatibility obligation. Rewrite internal APIs, schemas, crate boundaries and migrations directly when the current architecture requires it. Do not add aliases, shims, fallback readers, dual paths or legacy layers without a real current compatibility obligation.
+# Execution Contract
 
 ## Authority
 
-Read in this order:
+- Architecture-Vault owns long-term target semantics, accepted design decisions, rationale, and long-term research.
+- This repository owns current implementation behavior, code-level contracts, implementation plans, and verification evidence.
+- Current source, Protobuf definitions, manifests, and tests establish what this checkout implements. Do not infer implementation from target design or earlier documentation.
+- `docs/plans/active/` contains current implementation authorization. Do not start code work from a completed, superseded, or research-only document.
 
-1. `docs/Nous_Wave/ARCHITECTURE.md`
-2. `docs/Nous_Wave/DECISIONS.md`
-3. active implementation handoff/spec
-4. `docs/Nous_Wave/DESIGN_TRANSFER.md`
-5. current implementation
+## Architecture boundaries
 
-`docs/Nous_Wave/SYSTEM.md` explains behavior but does not override architecture/decisions.
+- Keep Subject Core, Cognitive Runtime, Memory, material/evidence, Authority Store, retrieval, and Serving behind their current owners.
+- Memory is optional to the runtime composition. Do not move Subject Core or generic Cognitive Runtime ownership into Memory.
+- Long-term target semantics for Memory classes, CognitiveSchema, Self, Social Cognition, Motivation, and cross-system behavior are owned by Architecture-Vault. This codebase does not maintain a second target ontology.
+- Current code implements TypeScript Core + Rust Kernel. Do not claim Self/Social/Motivation, Desired Condition, Pursuit, or Heptalogos live cognition integration is implemented without current code, protocol, and test evidence.
+- Current code contains EPA/Residual and bounded Wave implementations. They are not permanent design authority or production-default claims. VCP is research lineage; its source code is not copied.
 
-A DEFAULT selected for the active wave may be frozen for execution without becoming permanent architecture.
+## Implementation and verification
 
-## Core invariants
-
-```text
-Subject != Model
-Character Seed != evolved Persona
-Artifact != Memory
-ObservationOccurrence != Artifact
-Message != Memory
-Tool result != Truth
-Retrieved != Reinforced
-Forgetting != Suppression != Purge
-Resource awareness != Resource contents
-Serving projection != Cognitive Authority
-MicroSystem != microservice/plugin marketplace
-```
-
-Subject Core and Cognitive Runtime are required owners. Memory is an optional cognitive MicroSystem enabled by the reference profile.
-
-## Executor role
-
-Implement the active design. Do not reopen decided architecture during execution.
-
-If implementation reveals a material unresolved semantic/ownership/provider/failure decision, report a narrow `PLAN_GAP`. Do not hide uncertainty behind a registry, framework, policy engine, configuration layer or generic abstraction.
-
-## Library-first
-
-Use mature libraries and platform facilities for generic mechanics.
-
-Current physical defaults include PostgreSQL/SQLx, OpenDAL, BLAKE3, Tantivy, USearch, petgraph, nalgebra, roaring, Rayon, ArcSwap, Axum and Tokio.
-
-Dependency count is not a quality metric.
-
-## Algorithm boundaries
-
-Stable abstractions represent semantic problem families, not concrete algorithm names.
-
-Current defaults include:
-- EPA/Residual for semantic cue sensing;
-- bounded competitive Wave for associative expansion.
-
-These algorithms may be replaced behind narrow internal traits when justified. Do not create a generic algorithm marketplace or expose implementation-specific algorithm fields in public Cognitive Query semantics.
-
-VCP is research lineage only. Do not copy/transliterate its source code.
-
-## Architecture discipline
-
-- Domain owners own semantics; mature libraries own generic mechanics.
-- Memory must not own Subject Core or generic Cognitive Runtime.
-- Serving projections never become Authority.
-- Preserve immutable provenance and revision lineage.
-- Keep classification axes orthogonal.
-- Do not force arbitrary material into chat-message/text-chunk shapes.
-- Do not create a universal `CognitiveObject` JSON ontology.
-- Do not invent numeric cognitive scales without operational meaning.
-- Do not add a scheduler/cron/self-wakeup loop.
-- Do not create empty future MicroSystem crates.
-- Do not silently drop a design transfer documented in `DESIGN_TRANSFER.md`.
-
-## Repository engineering
-
-Deterministic mechanical invariants should be automated.
-
-Use:
-- rustfmt;
-- Clippy workspace lints;
-- cargo-deny;
-- cargo-shear;
-- source-shape guard;
-- Just as the task entrypoint.
-
-Large source files are signals, not architecture definitions. A >1000-line Rust source file is blocked by repository policy unless explicitly excluded/generated. Refactor by semantic ownership and independent reasons to change, not arbitrary line slicing.
-
-## Verification
-
-During iteration use the narrowest useful check.
-
-At meaningful integration/acceptance boundaries run:
-
-```text
-just verify
-```
-
-Tests protect semantic contracts and observed risks. TDD is optional.
-
-## Completion
-
-When the active implementation behavior, repository governance and acceptance proof are complete, remove obsolete execution-stage artifacts and STOP.
+- Use the dependency and tool routes selected in workspace manifests and lockfiles. Prefer suitable mature libraries for generic mechanics, behind Nous-owned interfaces.
+- Compatibility is required only for an explicit current obligation. TDD is optional; tests protect current contracts, observed risks, or meaningful uncertainty.
+- During iteration, use the narrowest useful check. At an authorized acceptance boundary use `corepack pnpm check` and `just verify` as required by the active Plan.
+- Do not add speculative fallback paths, schedulers, validators, recovery layers, or verification processes for hypothetical future work.
+- Report evidence as `PASS`, `FAIL`, `NOT_RUN`, or `BLOCKED` and keep each claim within what actually ran.

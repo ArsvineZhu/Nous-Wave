@@ -9,4 +9,4 @@
 - 查阅当前施工授权：阅读[活动计划](plans/README.md)。
 - 查询 NousQL 当前解析与绑定行为：阅读[NousQL 参考](reference/NOUSQL.md)。
 
-目标设计不会复制到本目录。实现状态、执行计划和源代码事实以当前仓库为准。
+目标设计不会复制到本目录。实现状态、执行计划和源代码事实以当前仓库为准；计划层次为 Target Design → Target Engineering Plan → Active Milestone Plan → Executable Specs → Code → Qualification。

@@ -12,6 +12,7 @@
 ## 计划
 
 - [活动计划目录](plans/README.md)
+- [Target Engineering Plan](plans/roadmap/2026-09-target-engineering-plan.md)：长期目标到代码施工的 Pre-Spec 工程轨迹。
 - [2026-10-27 记忆参考能力交付计划](plans/active/2026-10-27-memory-reference-profile.md)
 
 ## 当前代码参考
@@ -20,5 +21,5 @@
 
 ## 长期目标设计
 
-- [Nous Wave 目标设计 PDF](https://github.com/Heptalogos-Devs/Architecture-Vault/releases/download/nous-wave-target-design-latest/Nous_Wave_Target_Design.pdf)
+- [Nous Wave 目标设计正文](https://github.com/Heptalogos-Devs/Architecture-Vault/blob/main/docs/Nous-Wave/TARGET_DESIGN.md)
 - [Architecture-Vault](https://github.com/Heptalogos-Devs/Architecture-Vault)

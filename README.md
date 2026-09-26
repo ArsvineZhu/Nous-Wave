@@ -4,7 +4,7 @@ Nous Wave is a pre-production Subject cognition system. This repository owns the
 
 ## Target design
 
-- [Nous Wave Target Design PDF](https://github.com/Heptalogos-Devs/Architecture-Vault/releases/download/nous-wave-target-design-latest/Nous_Wave_Target_Design.pdf)
+- [Nous Wave Target Design](https://github.com/Heptalogos-Devs/Architecture-Vault/blob/main/docs/Nous-Wave/TARGET_DESIGN.md)
 - [Architecture-Vault](https://github.com/Heptalogos-Devs/Architecture-Vault)
 
 Architecture-Vault owns long-term product semantics, accepted design decisions, rationale, and research. This repository maintains code facts, current implementation architecture and gaps, active implementation plans, and code-specific API references.
